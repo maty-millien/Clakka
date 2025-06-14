@@ -16,7 +16,48 @@ void signalHandler(int signum) {
 }
 
 CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
-    if (type == kCGEventKeyDown) {
+    static CGEventFlags lastFlags = CGEventGetFlags(event);
+    if (type == kCGEventFlagsChanged) {
+        CGEventFlags flags = CGEventGetFlags(event);
+        CGEventFlags changed = flags ^ lastFlags;
+        if (changed & kCGEventFlagMaskShift) {
+            if (flags & kCGEventFlagMaskShift)
+                audioEngine.play(AudioEngine::PRESS);
+            else
+                audioEngine.play(AudioEngine::RELEASE);
+        }
+        if (changed & kCGEventFlagMaskControl) {
+            if (flags & kCGEventFlagMaskControl)
+                audioEngine.play(AudioEngine::PRESS);
+            else
+                audioEngine.play(AudioEngine::RELEASE);
+        }
+        if (changed & kCGEventFlagMaskAlternate) {
+            if (flags & kCGEventFlagMaskAlternate)
+                audioEngine.play(AudioEngine::PRESS);
+            else
+                audioEngine.play(AudioEngine::RELEASE);
+        }
+        if (changed & kCGEventFlagMaskCommand) {
+            if (flags & kCGEventFlagMaskCommand)
+                audioEngine.play(AudioEngine::PRESS);
+            else
+                audioEngine.play(AudioEngine::RELEASE);
+        }
+        if (changed & kCGEventFlagMaskAlphaShift) {
+            if (flags & kCGEventFlagMaskAlphaShift)
+                audioEngine.play(AudioEngine::PRESS);
+            else
+                audioEngine.play(AudioEngine::RELEASE);
+        }
+        if (changed & kCGEventFlagMaskSecondaryFn) {
+            if (flags & kCGEventFlagMaskSecondaryFn)
+                audioEngine.play(AudioEngine::PRESS);
+            else
+                audioEngine.play(AudioEngine::RELEASE);
+        }
+        lastFlags = flags;
+    } else if (type == kCGEventKeyDown) {
         if (CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) == 0) {
             audioEngine.play(AudioEngine::PRESS);
         }
@@ -39,7 +80,7 @@ int main(int argc, const char * argv[]) {
 
     CFMachPortRef eventTap = CGEventTapCreate(
         kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
-        CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp), keyboardCallback, NULL
+        CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp) | CGEventMaskBit(kCGEventFlagsChanged), keyboardCallback, NULL
     );
 
     if (!eventTap) {
