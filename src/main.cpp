@@ -5,6 +5,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include "AudioEngine.h"
 
+
 AudioEngine audioEngine;
 std::atomic<bool> shouldExit(false);
 
@@ -16,7 +17,11 @@ void signalHandler(int signum) {
 
 CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
     if (type == kCGEventKeyDown) {
-        audioEngine.play();
+        if (CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) == 0) {
+            audioEngine.play(AudioEngine::PRESS);
+        }
+    } else if (type == kCGEventKeyUp) {
+        audioEngine.play(AudioEngine::RELEASE);
     }
     return event;
 }
@@ -25,15 +30,16 @@ int main(int argc, const char * argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    if (!audioEngine.loadWav("key_press.wav")) {
-        if (!audioEngine.loadWav("../res/key_press.wav")) {
-            return 1;
-        }
+    if (!audioEngine.loadWav("../res/key_press.wav", AudioEngine::PRESS)) {
+        return 1;
+    }
+    if (!audioEngine.loadWav("../res/key_release.wav", AudioEngine::RELEASE)) {
+        return 1;
     }
 
     CFMachPortRef eventTap = CGEventTapCreate(
         kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
-        CGEventMaskBit(kCGEventKeyDown), keyboardCallback, NULL
+        CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp), keyboardCallback, NULL
     );
 
     if (!eventTap) {

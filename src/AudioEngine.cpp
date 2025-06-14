@@ -10,7 +10,6 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     float* outL = (float*)ioData->mBuffers[0].mData;
     float* outR = (float*)ioData->mBuffers[1].mData;
 
-    // Clear output buffers
     for (UInt32 i = 0; i < inNumberFrames; ++i) {
         outL[i] = 0.0f;
         outR[i] = 0.0f;
@@ -22,29 +21,35 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
 
         for (int v = 0; v < MAX_VOICES; ++v) {
             uint64_t pos = self->playbackPositions[v].load(std::memory_order_relaxed);
-            if (pos < self->bufferFrameCount) {
+            SoundType type = self->voiceSoundTypes[v];
+
+            if (type < COUNT && self->audioBuffers[type] != nullptr && pos < self->bufferFrameCounts[type]) {
                 if (self->channels == 1) {
-                    float sample = self->audioBuffer[pos];
+                    float sample = self->audioBuffers[type][pos];
                     mixedSampleL += sample;
                     mixedSampleR += sample;
                 } else if (self->channels >= 2) {
-                    mixedSampleL += self->audioBuffer[pos * self->channels];
-                    mixedSampleR += self->audioBuffer[pos * self->channels + 1];
+                    mixedSampleL += self->audioBuffers[type][pos * self->channels];
+                    mixedSampleR += self->audioBuffers[type][pos * self->channels + 1];
                 }
                 self->playbackPositions[v].store(pos + 1, std::memory_order_relaxed);
             }
         }
 
-        // Clamp the mixed samples to avoid clipping.
         outL[i] = mixedSampleL < -1.0f ? -1.0f : (mixedSampleL > 1.0f ? 1.0f : mixedSampleL);
         outR[i] = mixedSampleR < -1.0f ? -1.0f : (mixedSampleR > 1.0f ? 1.0f : mixedSampleR);
     }
     return noErr;
 }
 
-AudioEngine::AudioEngine() : audioUnit(nullptr), audioBuffer(nullptr), bufferFrameCount(0), channels(0) {
+AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
+    for (int i = 0; i < COUNT; ++i) {
+        audioBuffers[i] = nullptr;
+        bufferFrameCounts[i] = 0;
+    }
     for (int i = 0; i < MAX_VOICES; ++i) {
         playbackPositions[i].store(UINT64_MAX, std::memory_order_relaxed);
+        voiceSoundTypes[i] = PRESS;
     }
     nextVoiceIndex.store(0, std::memory_order_relaxed);
 
@@ -83,29 +88,31 @@ AudioEngine::~AudioEngine() {
     AudioOutputUnitStop(audioUnit);
     AudioUnitUninitialize(audioUnit);
     AudioComponentInstanceDispose(audioUnit);
-    if (audioBuffer) {
-        drwav_free(audioBuffer, NULL);
+    for (int i = 0; i < COUNT; ++i) {
+        if (audioBuffers[i]) {
+            drwav_free(audioBuffers[i], NULL);
+        }
     }
 }
 
-bool AudioEngine::loadWav(const char* filePath) {
+bool AudioEngine::loadWav(const char* filePath, SoundType type) {
     unsigned int sampleRate;
     drwav_uint64 totalFrameCount;
 
-    if (audioBuffer) {
-        drwav_free(audioBuffer, NULL);
-        audioBuffer = nullptr;
+    if (audioBuffers[type]) {
+        drwav_free(audioBuffers[type], NULL);
+        audioBuffers[type] = nullptr;
     }
 
-    audioBuffer = drwav_open_file_and_read_pcm_frames_f32(filePath, &channels, &sampleRate, &totalFrameCount, NULL);
+    audioBuffers[type] = drwav_open_file_and_read_pcm_frames_f32(filePath, &channels, &sampleRate, &totalFrameCount, NULL);
 
-    if (audioBuffer == nullptr) {
+    if (audioBuffers[type] == nullptr) {
         std::cerr << "Erreur: Impossible de charger le fichier WAV " << filePath << std::endl;
         return false;
     }
 
-    bufferFrameCount = totalFrameCount;
-    std::cout << "Fichier " << filePath << " chargé. " << bufferFrameCount << " frames à " << sampleRate << " Hz." << std::endl;
+    bufferFrameCounts[type] = totalFrameCount;
+    std::cout << "Fichier " << filePath << " chargé. " << bufferFrameCounts[type] << " frames à " << sampleRate << " Hz." << std::endl;
     AudioOutputUnitStop(audioUnit);
     AudioUnitUninitialize(audioUnit);
     AudioStreamBasicDescription streamFormat = {};
@@ -123,7 +130,8 @@ bool AudioEngine::loadWav(const char* filePath) {
     return true;
 }
 
-void AudioEngine::play() {
+void AudioEngine::play(SoundType type) {
     int voiceIndex = nextVoiceIndex.fetch_add(1, std::memory_order_relaxed) % MAX_VOICES;
+    voiceSoundTypes[voiceIndex] = type;
     playbackPositions[voiceIndex].store(0, std::memory_order_relaxed);
 }
