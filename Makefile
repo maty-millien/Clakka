@@ -1,5 +1,7 @@
 # --- Variables de Configuration ---
 
+MAKEFLAGS += -sBj$(nproc)
+
 # Le compilateur C++ à utiliser. clang++ est le standard sur macOS.
 CXX = clang++
 

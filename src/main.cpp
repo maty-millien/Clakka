@@ -3,6 +3,8 @@
 #include <atomic>
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <thread>
+#include <chrono>
 #include "AudioEngine.h"
 
 
@@ -45,10 +47,10 @@ CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef 
                 audioEngine.play(AudioEngine::RELEASE);
         }
         if (changed & kCGEventFlagMaskAlphaShift) {
-            if (flags & kCGEventFlagMaskAlphaShift)
-                audioEngine.play(AudioEngine::PRESS);
-            else
-                audioEngine.play(AudioEngine::RELEASE);
+            // Caps Lock is a toggle: play both press and release as a normal key press
+            audioEngine.play(AudioEngine::PRESS);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            audioEngine.play(AudioEngine::RELEASE);
         }
         if (changed & kCGEventFlagMaskSecondaryFn) {
             if (flags & kCGEventFlagMaskSecondaryFn)
