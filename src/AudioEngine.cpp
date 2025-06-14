@@ -1,7 +1,5 @@
 #include "AudioEngine.h"
 #include <iostream>
-#include <algorithm>
-#include <mutex>
 
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
@@ -12,36 +10,44 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     float* outL = (float*)ioData->mBuffers[0].mData;
     float* outR = (float*)ioData->mBuffers[1].mData;
 
+    // Clear output buffers
+    for (UInt32 i = 0; i < inNumberFrames; ++i) {
+        outL[i] = 0.0f;
+        outR[i] = 0.0f;
+    }
+
     for (UInt32 i = 0; i < inNumberFrames; ++i) {
         float mixedSampleL = 0.0f;
         float mixedSampleR = 0.0f;
-        {
-            std::lock_guard<std::mutex> lock(self->playbackMutex);
-            for (auto &pos : self->playbackPositions) {
-                if (pos < self->bufferFrameCount) {
-                    if (self->channels == 1) {
-                        float sample = self->audioBuffer[pos];
-                        mixedSampleL += sample;
-                        mixedSampleR += sample;
-                    } else if (self->channels >= 2) {
-                        mixedSampleL += self->audioBuffer[pos * self->channels];
-                        mixedSampleR += self->audioBuffer[pos * self->channels + 1];
-                    }
-                    pos++;
+
+        for (int v = 0; v < MAX_VOICES; ++v) {
+            uint64_t pos = self->playbackPositions[v].load(std::memory_order_relaxed);
+            if (pos < self->bufferFrameCount) {
+                if (self->channels == 1) {
+                    float sample = self->audioBuffer[pos];
+                    mixedSampleL += sample;
+                    mixedSampleR += sample;
+                } else if (self->channels >= 2) {
+                    mixedSampleL += self->audioBuffer[pos * self->channels];
+                    mixedSampleR += self->audioBuffer[pos * self->channels + 1];
                 }
+                self->playbackPositions[v].store(pos + 1, std::memory_order_relaxed);
             }
-            self->playbackPositions.erase(
-                std::remove_if(self->playbackPositions.begin(), self->playbackPositions.end(),
-                               [&](uint64_t pos){ return pos >= self->bufferFrameCount; }),
-                self->playbackPositions.end());
         }
-        outL[i] = std::max(-1.0f, std::min(1.0f, mixedSampleL));
-        outR[i] = std::max(-1.0f, std::min(1.0f, mixedSampleR));
+
+        // Clamp the mixed samples to avoid clipping.
+        outL[i] = mixedSampleL < -1.0f ? -1.0f : (mixedSampleL > 1.0f ? 1.0f : mixedSampleL);
+        outR[i] = mixedSampleR < -1.0f ? -1.0f : (mixedSampleR > 1.0f ? 1.0f : mixedSampleR);
     }
     return noErr;
 }
 
 AudioEngine::AudioEngine() : audioUnit(nullptr), audioBuffer(nullptr), bufferFrameCount(0), channels(0) {
+    for (int i = 0; i < MAX_VOICES; ++i) {
+        playbackPositions[i].store(UINT64_MAX, std::memory_order_relaxed);
+    }
+    nextVoiceIndex.store(0, std::memory_order_relaxed);
+
     AudioComponentDescription desc = {};
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_DefaultOutput;
@@ -118,6 +124,6 @@ bool AudioEngine::loadWav(const char* filePath) {
 }
 
 void AudioEngine::play() {
-    std::lock_guard<std::mutex> lock(playbackMutex);
-    playbackPositions.push_back(0);
+    int voiceIndex = nextVoiceIndex.fetch_add(1, std::memory_order_relaxed) % MAX_VOICES;
+    playbackPositions[voiceIndex].store(0, std::memory_order_relaxed);
 }

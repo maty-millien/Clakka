@@ -1,9 +1,18 @@
 #include <iostream>
+#include <csignal>
+#include <atomic>
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include "AudioEngine.h"
 
 AudioEngine audioEngine;
+std::atomic<bool> shouldExit(false);
+
+void signalHandler(int signum) {
+    std::cout << "Signal (" << signum << ") reçu. Arrêt..." << std::endl;
+    shouldExit = true;
+    CFRunLoopStop(CFRunLoopGetCurrent());
+}
 
 CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
     if (type == kCGEventKeyDown) {
@@ -13,6 +22,9 @@ CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef 
 }
 
 int main(int argc, const char * argv[]) {
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
+
     if (!audioEngine.loadWav("key_press.wav")) {
         if (!audioEngine.loadWav("../res/key_press.wav")) {
             return 1;
@@ -33,8 +45,10 @@ int main(int argc, const char * argv[]) {
     CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes);
     CGEventTapEnable(eventTap, true);
 
-    std::cout << "Moteur Kream démarré. Appuyez sur des touches..." << std::endl;
+    std::cout << "Moteur Kream démarré. Appuyez sur des touches... (Ctrl+C pour quitter)" << std::endl;
     CFRunLoopRun();
+
+    std::cout << "Arrêt du moteur Kream." << std::endl;
 
     CFRelease(eventTap);
     CFRelease(runLoopSource);

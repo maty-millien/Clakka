@@ -8,7 +8,7 @@ CXX = clang++
 # -g         : Inclure les informations de débogage.
 # -Wall      : Afficher tous les avertissements (Warning ALL).
 # -O2        : Optimiser le code pour la vitesse.
-CXXFLAGS = -std=c++17 -g -Wall -O2
+CXXFLAGS = -std=c++17 -Wall -O3 -DNDEBUG -flto
 
 # Les frameworks macOS requis. C'est la partie la plus importante pour la liaison.
 FRAMEWORKS = -framework CoreGraphics -framework AudioToolbox -framework CoreFoundation

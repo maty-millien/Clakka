@@ -1,8 +1,9 @@
 #pragma once
 #include <AudioToolbox/AudioToolbox.h>
 #include <cstdint>
-#include <vector>
-#include <mutex>
+#include <atomic>
+
+const int MAX_VOICES = 32;
 
 class AudioEngine {
 public:
@@ -17,8 +18,9 @@ private:
     float* audioBuffer;
     uint64_t bufferFrameCount;
     unsigned int channels;
-    std::vector<uint64_t> playbackPositions;
-    std::mutex playbackMutex;
+
+    std::atomic<uint64_t> playbackPositions[MAX_VOICES];
+    std::atomic<int> nextVoiceIndex;
 
     static OSStatus renderCallback(void *inRefCon,
                                    AudioUnitRenderActionFlags *ioActionFlags,
