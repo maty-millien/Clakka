@@ -1,11 +1,26 @@
 #include "AudioEngine.h"
 #include <iostream>
 #include <CoreAudio/CoreAudio.h>
+#include <mach/mach_time.h>
 
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
 OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {
+    // Instrumentation for latency measurement
+    static mach_timebase_info_data_t timebaseInfo;
+    static bool timebaseInitialized = false;
+    if (!timebaseInitialized) {
+        mach_timebase_info(&timebaseInfo);
+        timebaseInitialized = true;
+    }
+    uint64_t now = mach_absolute_time();
+    uint64_t hostTime = inTimeStamp->mHostTime;
+    uint64_t nowNs = now * timebaseInfo.numer / timebaseInfo.denom;
+    uint64_t hostNs = hostTime * timebaseInfo.numer / timebaseInfo.denom;
+    int64_t deltaNs = nowNs > hostNs ? nowNs - hostNs : hostNs - nowNs;
+    std::cout << "Callback latency: " << (deltaNs / 1000.0) << " us" << std::endl;
+
     AudioEngine* self = static_cast<AudioEngine*>(inRefCon);
 
     float* outL = (float*)ioData->mBuffers[0].mData;
@@ -82,21 +97,37 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
                          &deviceID,
                          sizeof(deviceID));
 
-    // 3. Request a small hardware buffer size (64 frames). If the hardware cannot honour
-    //    this request it will choose the nearest supported size.
-    UInt32 frameSize = 64;
-    addr.mSelector = kAudioDevicePropertyBufferFrameSize;
+    // 3. Query and set the hardware buffer size to the minimum supported frames to reduce latency.
+    AudioValueRange bufferSizeRange;
+    UInt32 rangeSize = sizeof(bufferSizeRange);
+    addr.mSelector = kAudioDevicePropertyBufferFrameSizeRange;
     addr.mScope    = kAudioObjectPropertyScopeGlobal;
-    AudioObjectSetPropertyData(deviceID, &addr, 0, nullptr, sizeof(frameSize), &frameSize);
+    if (AudioObjectGetPropertyData(deviceID, &addr, 0, nullptr, &rangeSize, &bufferSizeRange) == noErr) {
+        UInt32 minBufferSize = static_cast<UInt32>(bufferSizeRange.mMinimum);
+        std::cout << "Setting HAL buffer size to " << minBufferSize << " frames" << std::endl;
+        addr.mSelector = kAudioDevicePropertyBufferFrameSize;
+        AudioObjectSetPropertyData(deviceID, &addr, 0, nullptr, sizeof(minBufferSize), &minBufferSize);
 
-    // 4. Let the AudioUnit know about our desired maximum slice size so Core Audio can
-    //    schedule smaller render cycles.
-    AudioUnitSetProperty(audioUnit,
-                         kAudioUnitProperty_MaximumFramesPerSlice,
-                         kAudioUnitScope_Global,
-                         0,
-                         &frameSize,
-                         sizeof(frameSize));
+        // 4. Let the AudioUnit know about our desired maximum slice size so Core Audio can
+        //    schedule smaller render cycles.
+        AudioUnitSetProperty(audioUnit,
+                            kAudioUnitProperty_MaximumFramesPerSlice,
+                            kAudioUnitScope_Global,
+                            0,
+                            &minBufferSize,
+                            sizeof(minBufferSize));
+    } else {
+        std::cerr << "Warning: Could not get buffer size range, using default 64 frames" << std::endl;
+        UInt32 defaultBufferSize = 64;
+        addr.mSelector = kAudioDevicePropertyBufferFrameSize;
+        AudioObjectSetPropertyData(deviceID, &addr, 0, nullptr, sizeof(defaultBufferSize), &defaultBufferSize);
+        AudioUnitSetProperty(audioUnit,
+                            kAudioUnitProperty_MaximumFramesPerSlice,
+                            kAudioUnitScope_Global,
+                            0,
+                            &defaultBufferSize,
+                            sizeof(defaultBufferSize));
+    }
 
     // 5. Disable the input bus and ensure the output bus is enabled (typical for a playback-only unit).
     UInt32 enableIO = 0;
