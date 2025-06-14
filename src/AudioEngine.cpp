@@ -1,5 +1,6 @@
 #include "AudioEngine.h"
 #include <iostream>
+#include <CoreAudio/CoreAudio.h>
 
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
@@ -55,14 +56,55 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
 
     AudioComponentDescription desc = {};
     desc.componentType = kAudioUnitType_Output;
-    desc.componentSubType = kAudioUnitSubType_DefaultOutput;
+    desc.componentSubType = kAudioUnitSubType_HALOutput;
     desc.componentFlags = 0;
     desc.componentFlagsMask = 0;
     desc.componentManufacturer = kAudioUnitManufacturer_Apple;
 
     AudioComponent outputComponent = AudioComponentFindNext(NULL, &desc);
     AudioComponentInstanceNew(outputComponent, &audioUnit);
-    AudioUnitInitialize(audioUnit);
+
+    // Configure the HAL output unit and underlying device for the smallest practical latency.
+
+    // 1. Retrieve the default output device ID.
+    AudioDeviceID deviceID = 0;
+    UInt32 size = sizeof(deviceID);
+    AudioObjectPropertyAddress addr = { kAudioHardwarePropertyDefaultOutputDevice,
+                                        kAudioObjectPropertyScopeGlobal,
+                                        kAudioObjectPropertyElementMain };
+    AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &deviceID);
+
+    // 2. Tell the AudioUnit to use this hardware device.
+    AudioUnitSetProperty(audioUnit,
+                         kAudioOutputUnitProperty_CurrentDevice,
+                         kAudioUnitScope_Global,
+                         0,
+                         &deviceID,
+                         sizeof(deviceID));
+
+    // 3. Request a small hardware buffer size (64 frames). If the hardware cannot honour
+    //    this request it will choose the nearest supported size.
+    UInt32 frameSize = 64;
+    addr.mSelector = kAudioDevicePropertyBufferFrameSize;
+    addr.mScope    = kAudioObjectPropertyScopeGlobal;
+    AudioObjectSetPropertyData(deviceID, &addr, 0, nullptr, sizeof(frameSize), &frameSize);
+
+    // 4. Let the AudioUnit know about our desired maximum slice size so Core Audio can
+    //    schedule smaller render cycles.
+    AudioUnitSetProperty(audioUnit,
+                         kAudioUnitProperty_MaximumFramesPerSlice,
+                         kAudioUnitScope_Global,
+                         0,
+                         &frameSize,
+                         sizeof(frameSize));
+
+    // 5. Disable the input bus and ensure the output bus is enabled (typical for a playback-only unit).
+    UInt32 enableIO = 0;
+    AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input,  1, &enableIO, sizeof(enableIO));
+    enableIO = 1;
+    AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enableIO, sizeof(enableIO));
+
+    // NOTE: We will call AudioUnitInitialize later, after setting the stream format and callback.
 
     AudioStreamBasicDescription streamFormat = {};
     streamFormat.mSampleRate = 44100.0;
@@ -81,6 +123,8 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
     callbackStruct.inputProcRefCon = this;
     AudioUnitSetProperty(audioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callbackStruct, sizeof(callbackStruct));
 
+    // Now that all properties are configured, initialise and start the unit.
+    AudioUnitInitialize(audioUnit);
     AudioOutputUnitStart(audioUnit);
 }
 
@@ -124,7 +168,12 @@ bool AudioEngine::loadWav(const char* filePath, SoundType type) {
     streamFormat.mBytesPerFrame = sizeof(float);
     streamFormat.mChannelsPerFrame = 2;
     streamFormat.mBitsPerChannel = 8 * sizeof(float);
+
+    // Preserve low-latency setting across re-initialisation.
+    UInt32 reloadFrameSize = 64;
+    AudioUnitSetProperty(audioUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &reloadFrameSize, sizeof(reloadFrameSize));
     AudioUnitSetProperty(audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &streamFormat, sizeof(streamFormat));
+
     AudioUnitInitialize(audioUnit);
     AudioOutputUnitStart(audioUnit);
     return true;
