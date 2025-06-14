@@ -11,7 +11,7 @@ CXX = clang++
 CXXFLAGS = -std=c++17 -Wall -O3 -DNDEBUG -flto
 
 # Les frameworks macOS requis. C'est la partie la plus importante pour la liaison.
-FRAMEWORKS = -framework CoreGraphics -framework AudioToolbox -framework CoreFoundation -framework CoreAudio
+FRAMEWORKS = -framework CoreGraphics -framework AudioToolbox -framework CoreFoundation -framework CoreAudio -framework Accelerate
 
 # Le nom de votre exécutable final.
 TARGET = kream_engine

@@ -28,6 +28,7 @@ private:
     std::atomic<uint64_t> playbackPositions[MAX_VOICES];
     SoundType voiceSoundTypes[MAX_VOICES];
     std::atomic<int> nextVoiceIndex;
+    double sampleRate;
 
     static OSStatus renderCallback(void *inRefCon,
                                    AudioUnitRenderActionFlags *ioActionFlags,

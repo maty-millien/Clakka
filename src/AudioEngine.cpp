@@ -2,11 +2,30 @@
 #include <iostream>
 #include <CoreAudio/CoreAudio.h>
 #include <mach/mach_time.h>
+#include <Accelerate/Accelerate.h>
+#include <cstring>
+#include <pthread.h>
+#include <mach/thread_policy.h>
+#include <mach/thread_act.h>
+#include <vector>
 
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
 OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {
+    // Real-time scheduling setup (once)
+    static bool rtScheduled = false;
+    if (!rtScheduled) {
+        AudioEngine* self = static_cast<AudioEngine*>(inRefCon);
+        // Period in nanoseconds
+        uint32_t period = static_cast<uint32_t>((inNumberFrames / self->sampleRate) * 1e9);
+        // Budget half of period
+        uint32_t computation = period / 2;
+        thread_port_t thread = pthread_mach_thread_np(pthread_self());
+        thread_time_constraint_policy_data_t policy = { period, computation, period, 0 };
+        thread_policy_set(thread, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&policy, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+        rtScheduled = true;
+    }
     // Instrumentation for latency measurement
     static mach_timebase_info_data_t timebaseInfo;
     static bool timebaseInitialized = false;
@@ -19,42 +38,64 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     uint64_t nowNs = now * timebaseInfo.numer / timebaseInfo.denom;
     uint64_t hostNs = hostTime * timebaseInfo.numer / timebaseInfo.denom;
     int64_t deltaNs = nowNs > hostNs ? nowNs - hostNs : hostNs - nowNs;
-    std::cout << "Callback latency: " << (deltaNs / 1000.0) << " us" << std::endl;
+    // Print latency for the first 100 callbacks to minimize overhead
+    static int latencyPrintCount = 0;
+    if (latencyPrintCount < 100) {
+        std::cout << "Callback latency: " << (deltaNs / 1000.0) << " us" << std::endl;
+        ++latencyPrintCount;
+    }
 
     AudioEngine* self = static_cast<AudioEngine*>(inRefCon);
 
     float* outL = (float*)ioData->mBuffers[0].mData;
     float* outR = (float*)ioData->mBuffers[1].mData;
 
-    for (UInt32 i = 0; i < inNumberFrames; ++i) {
-        outL[i] = 0.0f;
-        outR[i] = 0.0f;
+    // Copy atomic playback positions and voice types into local arrays
+    uint64_t localPositions[MAX_VOICES];
+    SoundType localTypes[MAX_VOICES];
+    for (int v = 0; v < MAX_VOICES; ++v) {
+        localPositions[v] = self->playbackPositions[v].load(std::memory_order_relaxed);
+        localTypes[v] = self->voiceSoundTypes[v];
     }
 
-    for (UInt32 i = 0; i < inNumberFrames; ++i) {
-        float mixedSampleL = 0.0f;
-        float mixedSampleR = 0.0f;
+    // Zero output buffers
+    memset(outL, 0, sizeof(float) * inNumberFrames);
+    memset(outR, 0, sizeof(float) * inNumberFrames);
 
-        for (int v = 0; v < MAX_VOICES; ++v) {
-            uint64_t pos = self->playbackPositions[v].load(std::memory_order_relaxed);
-            SoundType type = self->voiceSoundTypes[v];
-
-            if (type < COUNT && self->audioBuffers[type] != nullptr && pos < self->bufferFrameCounts[type]) {
-                if (self->channels == 1) {
-                    float sample = self->audioBuffers[type][pos];
-                    mixedSampleL += sample;
-                    mixedSampleR += sample;
-                } else if (self->channels >= 2) {
-                    mixedSampleL += self->audioBuffers[type][pos * self->channels];
-                    mixedSampleR += self->audioBuffers[type][pos * self->channels + 1];
-                }
-                self->playbackPositions[v].store(pos + 1, std::memory_order_relaxed);
+    // Vectorized mixing across voices using Accelerate
+    for (int v = 0; v < MAX_VOICES; ++v) {
+        uint64_t pos = localPositions[v];
+        SoundType type = localTypes[v];
+        if (type < COUNT && self->audioBuffers[type] != nullptr) {
+            uint64_t total = self->bufferFrameCounts[type];
+            UInt32 frames = inNumberFrames;
+            if (pos >= total) continue;
+            if (pos + frames > total) frames = static_cast<UInt32>(total - pos);
+            float* buffer = self->audioBuffers[type];
+            if (self->channels == 1) {
+                float* src = buffer + pos;
+                vDSP_vadd(src, 1, outL, 1, outL, 1, frames);
+                vDSP_vadd(src, 1, outR, 1, outR, 1, frames);
+            } else {
+                float* srcLeft = buffer + pos * self->channels;
+                float* srcRight = buffer + pos * self->channels + 1;
+                vDSP_vadd(srcLeft, self->channels, outL, 1, outL, 1, frames);
+                vDSP_vadd(srcRight, self->channels, outR, 1, outR, 1, frames);
             }
+            localPositions[v] = pos + frames;
         }
-
-        outL[i] = mixedSampleL < -1.0f ? -1.0f : (mixedSampleL > 1.0f ? 1.0f : mixedSampleL);
-        outR[i] = mixedSampleR < -1.0f ? -1.0f : (mixedSampleR > 1.0f ? 1.0f : mixedSampleR);
     }
+
+    // Clamp outputs between -1 and 1
+    float clipMin = -1.0f, clipMax = 1.0f;
+    vDSP_vclip(outL, 1, &clipMin, &clipMax, outL, 1, inNumberFrames);
+    vDSP_vclip(outR, 1, &clipMin, &clipMax, outR, 1, inNumberFrames);
+
+    // Store updated positions back to atomics
+    for (int v = 0; v < MAX_VOICES; ++v) {
+        self->playbackPositions[v].store(localPositions[v], std::memory_order_relaxed);
+    }
+
     return noErr;
 }
 
@@ -88,6 +129,22 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
                                         kAudioObjectPropertyScopeGlobal,
                                         kAudioObjectPropertyElementMain };
     AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &deviceID);
+
+    // 1.1 Query available sample rates and pick the highest for lowest period
+    AudioObjectPropertyAddress rateAddr = { kAudioDevicePropertyAvailableNominalSampleRates, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 rateSize = 0;
+    if (AudioObjectGetPropertyDataSize(deviceID, &rateAddr, 0, nullptr, &rateSize) == noErr && rateSize > 0) {
+        int count = rateSize / sizeof(AudioValueRange);
+        std::vector<AudioValueRange> ranges(count);
+        AudioObjectGetPropertyData(deviceID, &rateAddr, 0, nullptr, &rateSize, ranges.data());
+        sampleRate = ranges[0].mMaximum;
+        for (auto &r : ranges) {
+            if (r.mMaximum > sampleRate) sampleRate = r.mMaximum;
+        }
+        std::cout << "Using sample rate: " << sampleRate << " Hz" << std::endl;
+    } else {
+        sampleRate = 44100.0;
+    }
 
     // 2. Tell the AudioUnit to use this hardware device.
     AudioUnitSetProperty(audioUnit,
@@ -138,7 +195,7 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
     // NOTE: We will call AudioUnitInitialize later, after setting the stream format and callback.
 
     AudioStreamBasicDescription streamFormat = {};
-    streamFormat.mSampleRate = 44100.0;
+    streamFormat.mSampleRate = sampleRate;
     streamFormat.mFormatID = kAudioFormatLinearPCM;
     streamFormat.mFormatFlags = kAudioFormatFlagsNativeFloatPacked | kAudioFormatFlagIsNonInterleaved;
     streamFormat.mBytesPerPacket = sizeof(float);
@@ -205,6 +262,8 @@ bool AudioEngine::loadWav(const char* filePath, SoundType type) {
     AudioUnitSetProperty(audioUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &reloadFrameSize, sizeof(reloadFrameSize));
     AudioUnitSetProperty(audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &streamFormat, sizeof(streamFormat));
 
+    // Update sample rate and reinitialize audio unit
+    this->sampleRate = sampleRate;
     AudioUnitInitialize(audioUnit);
     AudioOutputUnitStart(audioUnit);
     return true;
