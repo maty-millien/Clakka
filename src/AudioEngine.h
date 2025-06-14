@@ -16,6 +16,7 @@ private:
     AudioUnit audioUnit;
     float* audioBuffer;
     uint64_t bufferFrameCount;
+    unsigned int channels;
     std::vector<uint64_t> playbackPositions;
     std::mutex playbackMutex;
 

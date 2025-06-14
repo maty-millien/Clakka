@@ -13,12 +13,20 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     float* outR = (float*)ioData->mBuffers[1].mData;
 
     for (UInt32 i = 0; i < inNumberFrames; ++i) {
-        float mixedSample = 0.0f;
+        float mixedSampleL = 0.0f;
+        float mixedSampleR = 0.0f;
         {
             std::lock_guard<std::mutex> lock(self->playbackMutex);
             for (auto &pos : self->playbackPositions) {
                 if (pos < self->bufferFrameCount) {
-                    mixedSample += self->audioBuffer[pos];
+                    if (self->channels == 1) {
+                        float sample = self->audioBuffer[pos];
+                        mixedSampleL += sample;
+                        mixedSampleR += sample;
+                    } else if (self->channels >= 2) {
+                        mixedSampleL += self->audioBuffer[pos * self->channels];
+                        mixedSampleR += self->audioBuffer[pos * self->channels + 1];
+                    }
                     pos++;
                 }
             }
@@ -27,13 +35,13 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
                                [&](uint64_t pos){ return pos >= self->bufferFrameCount; }),
                 self->playbackPositions.end());
         }
-        outL[i] = mixedSample;
-        outR[i] = mixedSample;
+        outL[i] = std::max(-1.0f, std::min(1.0f, mixedSampleL));
+        outR[i] = std::max(-1.0f, std::min(1.0f, mixedSampleR));
     }
     return noErr;
 }
 
-AudioEngine::AudioEngine() : audioUnit(nullptr), audioBuffer(nullptr), bufferFrameCount(0) {
+AudioEngine::AudioEngine() : audioUnit(nullptr), audioBuffer(nullptr), bufferFrameCount(0), channels(0) {
     AudioComponentDescription desc = {};
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_DefaultOutput;
@@ -69,13 +77,19 @@ AudioEngine::~AudioEngine() {
     AudioOutputUnitStop(audioUnit);
     AudioUnitUninitialize(audioUnit);
     AudioComponentInstanceDispose(audioUnit);
-    delete[] audioBuffer;
+    if (audioBuffer) {
+        drwav_free(audioBuffer, NULL);
+    }
 }
 
 bool AudioEngine::loadWav(const char* filePath) {
-    unsigned int channels;
     unsigned int sampleRate;
     drwav_uint64 totalFrameCount;
+
+    if (audioBuffer) {
+        drwav_free(audioBuffer, NULL);
+        audioBuffer = nullptr;
+    }
 
     audioBuffer = drwav_open_file_and_read_pcm_frames_f32(filePath, &channels, &sampleRate, &totalFrameCount, NULL);
 
