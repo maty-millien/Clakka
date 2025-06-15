@@ -34,11 +34,6 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     uint64_t nowNs = now * timebaseInfo.numer / timebaseInfo.denom;
     uint64_t hostNs = hostTime * timebaseInfo.numer / timebaseInfo.denom;
     int64_t deltaNs = nowNs > hostNs ? nowNs - hostNs : hostNs - nowNs;
-    static int latencyPrintCount = 0;
-    if (latencyPrintCount < 100) {
-        std::cout << "Callback latency: " << (deltaNs / 1000.0) << " us" << std::endl;
-        ++latencyPrintCount;
-    }
 
     AudioEngine* self = static_cast<AudioEngine*>(inRefCon);
 
