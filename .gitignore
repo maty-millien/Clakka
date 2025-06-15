@@ -1,4 +1,3 @@
-# Build artifacts
 build/
 *.o
 *.a
@@ -9,21 +8,11 @@ build/
 *.gcda
 *.gcov
 .deps/
-
-# Editor/IDE specific files
 .vscode/
-
-# Package Manager
-# Since there is no explicit package manager, these are general ignores
-# for common package managers that might be used with C/C++ projects
 *.swp
 *~
 .DS_Store
-
-# Executables
 *.out
 *.exe
-
-# Logs and other generated files
 *.log
 *.tmp

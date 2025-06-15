@@ -13,20 +13,16 @@
 #include "dr_wav.h"
 
 OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {
-    // Real-time scheduling setup (once)
     static bool rtScheduled = false;
     if (!rtScheduled) {
         AudioEngine* self = static_cast<AudioEngine*>(inRefCon);
-        // Period in nanoseconds
         uint32_t period = static_cast<uint32_t>((inNumberFrames / self->sampleRate) * 1e9);
-        // Budget half of period
         uint32_t computation = period / 2;
         thread_port_t thread = pthread_mach_thread_np(pthread_self());
         thread_time_constraint_policy_data_t policy = { period, computation, period, 0 };
         thread_policy_set(thread, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&policy, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
         rtScheduled = true;
     }
-    // Instrumentation for latency measurement
     static mach_timebase_info_data_t timebaseInfo;
     static bool timebaseInitialized = false;
     if (!timebaseInitialized) {
@@ -38,7 +34,6 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     uint64_t nowNs = now * timebaseInfo.numer / timebaseInfo.denom;
     uint64_t hostNs = hostTime * timebaseInfo.numer / timebaseInfo.denom;
     int64_t deltaNs = nowNs > hostNs ? nowNs - hostNs : hostNs - nowNs;
-    // Print latency for the first 100 callbacks to minimize overhead
     static int latencyPrintCount = 0;
     if (latencyPrintCount < 100) {
         std::cout << "Callback latency: " << (deltaNs / 1000.0) << " us" << std::endl;
@@ -50,7 +45,6 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     float* outL = (float*)ioData->mBuffers[0].mData;
     float* outR = (float*)ioData->mBuffers[1].mData;
 
-    // Copy atomic playback positions and per-voice buffer pointers/counts into local arrays
     uint64_t localPositions[MAX_VOICES];
     float*   localBuffers[MAX_VOICES];
     uint64_t localFrameCounts[MAX_VOICES];
@@ -60,11 +54,9 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
         localFrameCounts[v]  = self->voiceBufferFrameCounts[v];
     }
 
-    // Zero output buffers
     memset(outL, 0, sizeof(float) * inNumberFrames);
     memset(outR, 0, sizeof(float) * inNumberFrames);
 
-    // Vectorized mixing across voices using Accelerate
     for (int v = 0; v < MAX_VOICES; ++v) {
         uint64_t pos      = localPositions[v];
         float*   buffer   = localBuffers[v];
@@ -73,7 +65,6 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
             UInt32 frames   = inNumberFrames;
             if (pos >= total) continue;
             if (pos + frames > total) frames = static_cast<UInt32>(total - pos);
-            // buffer now points to either mono or interleaved float data based on channels
             if (self->channels == 1) {
                 float* src = buffer + pos;
                 vDSP_vadd(src, 1, outL, 1, outL, 1, frames);
@@ -88,12 +79,10 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
         }
     }
 
-    // Clamp outputs between -1 and 1
     float clipMin = -1.0f, clipMax = 1.0f;
     vDSP_vclip(outL, 1, &clipMin, &clipMax, outL, 1, inNumberFrames);
     vDSP_vclip(outR, 1, &clipMin, &clipMax, outR, 1, inNumberFrames);
 
-    // Store updated positions back to atomics
     for (int v = 0; v < MAX_VOICES; ++v) {
         self->playbackPositions[v].store(localPositions[v], std::memory_order_relaxed);
     }
@@ -102,7 +91,6 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
 }
 
 AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
-    // Initialize fallback rotation indices for each sound type
     for (int i = 0; i < COUNT; ++i) {
         nextFallbackIndex[i] = 0;
     }
@@ -123,9 +111,6 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
     AudioComponent outputComponent = AudioComponentFindNext(NULL, &desc);
     AudioComponentInstanceNew(outputComponent, &audioUnit);
 
-    // Configure the HAL output unit and underlying device for the smallest practical latency.
-
-    // 1. Retrieve the default output device ID.
     AudioDeviceID deviceID = 0;
     UInt32 size = sizeof(deviceID);
     AudioObjectPropertyAddress addr = { kAudioHardwarePropertyDefaultOutputDevice,
@@ -133,7 +118,6 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
                                         kAudioObjectPropertyElementMain };
     AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &deviceID);
 
-    // 1.1 Query available sample rates and pick the highest for lowest period
     AudioObjectPropertyAddress rateAddr = { kAudioDevicePropertyAvailableNominalSampleRates, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     UInt32 rateSize = 0;
     if (AudioObjectGetPropertyDataSize(deviceID, &rateAddr, 0, nullptr, &rateSize) == noErr && rateSize > 0) {
@@ -149,7 +133,6 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
         sampleRate = 44100.0;
     }
 
-    // 2. Tell the AudioUnit to use this hardware device.
     AudioUnitSetProperty(audioUnit,
                          kAudioOutputUnitProperty_CurrentDevice,
                          kAudioUnitScope_Global,
@@ -157,7 +140,6 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
                          &deviceID,
                          sizeof(deviceID));
 
-    // 3. Query and set the hardware buffer size to the minimum supported frames to reduce latency.
     AudioValueRange bufferSizeRange;
     UInt32 rangeSize = sizeof(bufferSizeRange);
     addr.mSelector = kAudioDevicePropertyBufferFrameSizeRange;
@@ -168,8 +150,6 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
         addr.mSelector = kAudioDevicePropertyBufferFrameSize;
         AudioObjectSetPropertyData(deviceID, &addr, 0, nullptr, sizeof(minBufferSize), &minBufferSize);
 
-        // 4. Let the AudioUnit know about our desired maximum slice size so Core Audio can
-        //    schedule smaller render cycles.
         AudioUnitSetProperty(audioUnit,
                             kAudioUnitProperty_MaximumFramesPerSlice,
                             kAudioUnitScope_Global,
@@ -189,13 +169,10 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
                             sizeof(defaultBufferSize));
     }
 
-    // 5. Disable the input bus and ensure the output bus is enabled (typical for a playback-only unit).
     UInt32 enableIO = 0;
     AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input,  1, &enableIO, sizeof(enableIO));
     enableIO = 1;
     AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enableIO, sizeof(enableIO));
-
-    // NOTE: We will call AudioUnitInitialize later, after setting the stream format and callback.
 
     AudioStreamBasicDescription streamFormat = {};
     streamFormat.mSampleRate = sampleRate;
@@ -214,7 +191,6 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
     callbackStruct.inputProcRefCon = this;
     AudioUnitSetProperty(audioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callbackStruct, sizeof(callbackStruct));
 
-    // Now that all properties are configured, initialise and start the unit.
     AudioUnitInitialize(audioUnit);
     AudioOutputUnitStart(audioUnit);
 }
@@ -223,7 +199,6 @@ AudioEngine::~AudioEngine() {
     AudioOutputUnitStop(audioUnit);
     AudioUnitUninitialize(audioUnit);
     AudioComponentInstanceDispose(audioUnit);
-    // Free explicit and fallback buffers
     for (int type = 0; type < COUNT; ++type) {
         for (auto &kv : explicitBuffers[type]) {
             drwav_free(kv.second.data, NULL);
@@ -234,8 +209,6 @@ AudioEngine::~AudioEngine() {
     }
 }
 
-// New API implementations
-// Load a sound for a specific key code and type (press/release)
 bool AudioEngine::loadKeySound(int keyCode, AudioEngine::SoundType type, const char* filePath) {
     unsigned int fileSampleRate;
     drwav_uint64 totalFrameCount;
@@ -248,7 +221,6 @@ bool AudioEngine::loadKeySound(int keyCode, AudioEngine::SoundType type, const c
     return true;
 }
 
-// Load a fallback sound to cycle through when no explicit key sound is set
 bool AudioEngine::loadFallbackSound(AudioEngine::SoundType type, const char* filePath) {
     unsigned int fileSampleRate;
     drwav_uint64 totalFrameCount;
@@ -261,7 +233,6 @@ bool AudioEngine::loadFallbackSound(AudioEngine::SoundType type, const char* fil
     return true;
 }
 
-// Play the sound associated with a key code and type
 void AudioEngine::play(int keyCode, AudioEngine::SoundType type) {
     AudioEngine::Buffer buf;
     auto it = explicitBuffers[type].find(keyCode);

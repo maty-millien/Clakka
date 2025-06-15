@@ -75,7 +75,6 @@ int main(int argc, const char * argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    // Load theme sounds (build-run copies WAVs into build/ so scan both current dir and themes/V1)
     std::unordered_map<std::string, int> keyCodeMap = {
         {"back", 51}, {"enter", 36}, {"tab", 48}, {"space", 49},
         {"shift", 56}, {"ctrl", 59}, {"caps", 57}
