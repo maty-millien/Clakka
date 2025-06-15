@@ -1,5 +1,11 @@
 #pragma once
 
+#include <AudioToolbox/AudioToolbox.h>
+#include <vector>
+#include <unordered_map>
+#include <atomic>
+#include <cstdint>
+
 const int MAX_VOICES = 16;
 
 class AudioEngine {

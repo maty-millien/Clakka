@@ -5,8 +5,8 @@ CXXFLAGS = -std=c++17 -Wall -O3 -DNDEBUG -flto -Ilib -Isrc
 FRAMEWORKS = -framework CoreGraphics -framework AudioToolbox -framework CoreFoundation -framework CoreAudio -framework Accelerate
 TARGET = kream_engine
 BUILDDIR = build
-THEMEDIR = themes/V1
-SOURCES = $(wildcard src/*.cpp) $(wildcard src/AudioEngine/*.cpp)
+THEMEDIR = assets/themes/V1
+SOURCES = $(shell find src -type f -name '*.cpp')
 OBJECTS = $(SOURCES:src/%.cpp=$(BUILDDIR)/%.o)
 
 all: $(BUILDDIR)/$(TARGET)
@@ -21,7 +21,8 @@ $(BUILDDIR)/%.o: src/%.cpp
 run:
 	$(MAKE) clean
 	$(MAKE) all
-	cp -r $(THEMEDIR)/* $(BUILDDIR)/
+	mkdir -p $(BUILDDIR)/assets/themes
+	cp -r $(THEMEDIR) $(BUILDDIR)/assets/themes/
 	cd $(BUILDDIR) && ./$(TARGET)
 
 clean:
