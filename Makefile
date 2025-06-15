@@ -5,7 +5,7 @@ CXXFLAGS = -std=c++17 -Wall -O3 -DNDEBUG -flto -Isrc -Ilib
 FRAMEWORKS = -framework CoreGraphics -framework AudioToolbox -framework CoreFoundation -framework CoreAudio -framework Accelerate
 TARGET = kream_engine
 BUILDDIR = build
-THEMEDIR = assets/themes/V1
+THEMEDIR = assets/themes/Creamy
 SOURCES = $(shell find src -type f -name '*.cpp')
 OBJECTS = $(SOURCES:src/%.cpp=$(BUILDDIR)/%.o)
 

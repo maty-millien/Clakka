@@ -10,7 +10,7 @@ void Theme::loadThemes(const std::string& themesPath) {
         {"back", 51}, {"enter", 36}, {"tab", 48}, {"space", 49},
         {"shift", 56}, {"ctrl", 59}, {"caps", 57}
     };
-    std::string themeDirs[] = {themesPath + "/V1"};
+    std::string themeDirs[] = {themesPath + "/Creamy"};
     for (const auto &themeDir : themeDirs) {
         DIR* dir = opendir(themeDir.c_str());
         if (!dir) {
