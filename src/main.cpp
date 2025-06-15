@@ -11,13 +11,6 @@
 #include <string>
 
 AudioEngine audioEngine;
-std::atomic<bool> shouldExit(false);
-
-void signalHandler(int signum) {
-    std::cout << "Signal (" << signum << ") reçu. Arrêt..." << std::endl;
-    shouldExit = true;
-    CFRunLoopStop(CFRunLoopGetCurrent());
-}
 
 CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
     static CGEventFlags lastFlags = CGEventGetFlags(event);
@@ -72,9 +65,6 @@ CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef 
 }
 
 int main(int argc, const char * argv[]) {
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
-
     std::unordered_map<std::string, int> keyCodeMap = {
         {"back", 51}, {"enter", 36}, {"tab", 48}, {"space", 49},
         {"shift", 56}, {"ctrl", 59}, {"caps", 57}
@@ -117,7 +107,7 @@ int main(int argc, const char * argv[]) {
     );
 
     if (!eventTap) {
-        std::cerr << "Erreur: Impossible de créer l'Event Tap. Vérifiez les permissions d'Accessibilité." << std::endl;
+        std::cerr << "Error: Failed to create event tap. Check Accessibility permissions." << std::endl;
         return 1;
     }
 
@@ -125,10 +115,10 @@ int main(int argc, const char * argv[]) {
     CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes);
     CGEventTapEnable(eventTap, true);
 
-    std::cout << "Moteur Kream démarré. Appuyez sur des touches... (Ctrl+C pour quitter)" << std::endl;
+    std::cout << "Kream engine started. Press keys... (Ctrl+C to quit)" << std::endl;
     CFRunLoopRun();
 
-    std::cout << "Arrêt du moteur Kream." << std::endl;
+    std::cout << "Kream engine stopped." << std::endl;
 
     CFRelease(eventTap);
     CFRelease(runLoopSource);
