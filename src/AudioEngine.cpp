@@ -80,7 +80,7 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     return noErr;
 }
 
-AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
+AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0), initialized(false) {
     for (int i = 0; i < COUNT; ++i) {
         nextFallbackIndex[i] = 0;
     }
@@ -90,7 +90,24 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
         voiceBufferFrameCounts[i] = 0;
     }
     nextVoiceIndex.store(0, std::memory_order_relaxed);
+}
 
+AudioEngine::~AudioEngine() {
+    AudioOutputUnitStop(audioUnit);
+    AudioUnitUninitialize(audioUnit);
+    AudioComponentInstanceDispose(audioUnit);
+    for (int type = 0; type < COUNT; ++type) {
+        for (auto &kv : explicitBuffers[type]) {
+            drwav_free(kv.second.data, NULL);
+        }
+        for (auto &buf : fallbackBuffers[type]) {
+            drwav_free(buf.data, NULL);
+        }
+    }
+}
+
+void AudioEngine::initAudioUnit(double fileSampleRate) {
+    sampleRate = fileSampleRate;
     AudioComponentDescription desc = {};
     desc.componentType = kAudioUnitType_Output;
     desc.componentSubType = kAudioUnitSubType_HALOutput;
@@ -98,30 +115,13 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
     desc.componentFlagsMask = 0;
     desc.componentManufacturer = kAudioUnitManufacturer_Apple;
 
-    AudioComponent outputComponent = AudioComponentFindNext(NULL, &desc);
+    AudioComponent outputComponent = AudioComponentFindNext(nullptr, &desc);
     AudioComponentInstanceNew(outputComponent, &audioUnit);
 
     AudioDeviceID deviceID = 0;
     UInt32 size = sizeof(deviceID);
-    AudioObjectPropertyAddress addr = { kAudioHardwarePropertyDefaultOutputDevice,
-                                        kAudioObjectPropertyScopeGlobal,
-                                        kAudioObjectPropertyElementMain };
+    AudioObjectPropertyAddress addr = { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &deviceID);
-
-    AudioObjectPropertyAddress rateAddr = { kAudioDevicePropertyAvailableNominalSampleRates, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    UInt32 rateSize = 0;
-    if (AudioObjectGetPropertyDataSize(deviceID, &rateAddr, 0, nullptr, &rateSize) == noErr && rateSize > 0) {
-        int count = rateSize / sizeof(AudioValueRange);
-        std::vector<AudioValueRange> ranges(count);
-        AudioObjectGetPropertyData(deviceID, &rateAddr, 0, nullptr, &rateSize, ranges.data());
-        sampleRate = ranges[0].mMaximum;
-        for (auto &r : ranges) {
-            if (r.mMaximum > sampleRate) sampleRate = r.mMaximum;
-        }
-        std::cout << "Using sample rate: " << sampleRate << " Hz" << std::endl;
-    } else {
-        sampleRate = 44100.0;
-    }
 
     AudioUnitSetProperty(audioUnit,
                          kAudioOutputUnitProperty_CurrentDevice,
@@ -174,29 +174,27 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
     streamFormat.mChannelsPerFrame = 2;
     streamFormat.mBitsPerChannel = 8 * sizeof(float);
 
-    AudioUnitSetProperty(audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &streamFormat, sizeof(streamFormat));
+    AudioUnitSetProperty(audioUnit,
+                         kAudioUnitProperty_StreamFormat,
+                         kAudioUnitScope_Input,
+                         0,
+                         &streamFormat,
+                         sizeof(streamFormat));
 
     AURenderCallbackStruct callbackStruct = {};
     callbackStruct.inputProc = &AudioEngine::renderCallback;
     callbackStruct.inputProcRefCon = this;
-    AudioUnitSetProperty(audioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callbackStruct, sizeof(callbackStruct));
+    AudioUnitSetProperty(audioUnit,
+                         kAudioUnitProperty_SetRenderCallback,
+                         kAudioUnitScope_Input,
+                         0,
+                         &callbackStruct,
+                         sizeof(callbackStruct));
 
     AudioUnitInitialize(audioUnit);
     AudioOutputUnitStart(audioUnit);
-}
 
-AudioEngine::~AudioEngine() {
-    AudioOutputUnitStop(audioUnit);
-    AudioUnitUninitialize(audioUnit);
-    AudioComponentInstanceDispose(audioUnit);
-    for (int type = 0; type < COUNT; ++type) {
-        for (auto &kv : explicitBuffers[type]) {
-            drwav_free(kv.second.data, NULL);
-        }
-        for (auto &buf : fallbackBuffers[type]) {
-            drwav_free(buf.data, NULL);
-        }
-    }
+    initialized = true;
 }
 
 bool AudioEngine::loadKeySound(int keyCode, AudioEngine::SoundType type, const char* filePath) {
@@ -208,6 +206,9 @@ bool AudioEngine::loadKeySound(int keyCode, AudioEngine::SoundType type, const c
         return false;
     }
     explicitBuffers[type][keyCode] = AudioEngine::Buffer{ data, totalFrameCount };
+    if (!initialized) {
+        initAudioUnit(fileSampleRate);
+    }
     return true;
 }
 
@@ -220,6 +221,9 @@ bool AudioEngine::loadFallbackSound(AudioEngine::SoundType type, const char* fil
         return false;
     }
     fallbackBuffers[type].push_back(AudioEngine::Buffer{ data, totalFrameCount });
+    if (!initialized) {
+        initAudioUnit(fileSampleRate);
+    }
     return true;
 }
 

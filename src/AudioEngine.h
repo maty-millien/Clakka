@@ -41,6 +41,9 @@ private:
     uint64_t voiceBufferFrameCounts[MAX_VOICES];
     std::atomic<int> nextVoiceIndex;
     double sampleRate;
+    bool initialized;
+
+    void initAudioUnit(double fileSampleRate);
 
     static OSStatus renderCallback(void *inRefCon,
                                    AudioUnitRenderActionFlags *ioActionFlags,
