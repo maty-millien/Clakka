@@ -1,16 +1,16 @@
-#include "InputManager.hpp"
+#include "Input.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
 #include <CoreFoundation/CoreFoundation.h>
 
-InputManager::InputManager(AudioEngine& engine) : audioEngine(engine), eventTap(nullptr), runLoopSource(nullptr) {}
+Input::Input(Audio& audio) : audio(audio), eventTap(nullptr), runLoopSource(nullptr) {}
 
-InputManager::~InputManager() {
+Input::~Input() {
     stop();
 }
 
-void InputManager::start() {
+void Input::start() {
     eventTap = CGEventTapCreate(
         kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
         CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp) | CGEventMaskBit(kCGEventFlagsChanged),
@@ -27,7 +27,7 @@ void InputManager::start() {
     CGEventTapEnable(eventTap, true);
 }
 
-void InputManager::stop() {
+void Input::stop() {
     if (eventTap) {
         CGEventTapEnable(eventTap, false);
         CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes);
@@ -38,8 +38,8 @@ void InputManager::stop() {
     }
 }
 
-CGEventRef InputManager::keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
-    InputManager* self = static_cast<InputManager*>(userInfo);
+CGEventRef Input::keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
+    Input* self = static_cast<Input*>(userInfo);
 
     static CGEventFlags lastFlags = CGEventGetFlags(event);
     int keyCode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
@@ -48,46 +48,46 @@ CGEventRef InputManager::keyboardCallback(CGEventTapProxy proxy, CGEventType typ
         CGEventFlags changed = flags ^ lastFlags;
         if (changed & kCGEventFlagMaskShift) {
             if (flags & kCGEventFlagMaskShift)
-                self->audioEngine.play(keyCode, AudioEngine::PRESS);
+                self->audio.play(keyCode, Audio::PRESS);
             else
-                self->audioEngine.play(keyCode, AudioEngine::RELEASE);
+                self->audio.play(keyCode, Audio::RELEASE);
         }
         if (changed & kCGEventFlagMaskControl) {
             if (flags & kCGEventFlagMaskControl)
-                self->audioEngine.play(keyCode, AudioEngine::PRESS);
+                self->audio.play(keyCode, Audio::PRESS);
             else
-                self->audioEngine.play(keyCode, AudioEngine::RELEASE);
+                self->audio.play(keyCode, Audio::RELEASE);
         }
         if (changed & kCGEventFlagMaskAlternate) {
             if (flags & kCGEventFlagMaskAlternate)
-                self->audioEngine.play(keyCode, AudioEngine::PRESS);
+                self->audio.play(keyCode, Audio::PRESS);
             else
-                self->audioEngine.play(keyCode, AudioEngine::RELEASE);
+                self->audio.play(keyCode, Audio::RELEASE);
         }
         if (changed & kCGEventFlagMaskCommand) {
             if (flags & kCGEventFlagMaskCommand)
-                self->audioEngine.play(keyCode, AudioEngine::PRESS);
+                self->audio.play(keyCode, Audio::PRESS);
             else
-                self->audioEngine.play(keyCode, AudioEngine::RELEASE);
+                self->audio.play(keyCode, Audio::RELEASE);
         }
         if (changed & kCGEventFlagMaskAlphaShift) {
-            self->audioEngine.play(keyCode, AudioEngine::PRESS);
+            self->audio.play(keyCode, Audio::PRESS);
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            self->audioEngine.play(keyCode, AudioEngine::RELEASE);
+            self->audio.play(keyCode, Audio::RELEASE);
         }
         if (changed & kCGEventFlagMaskSecondaryFn) {
             if (flags & kCGEventFlagMaskSecondaryFn)
-                self->audioEngine.play(keyCode, AudioEngine::PRESS);
+                self->audio.play(keyCode, Audio::PRESS);
             else
-                self->audioEngine.play(keyCode, AudioEngine::RELEASE);
+                self->audio.play(keyCode, Audio::RELEASE);
         }
         lastFlags = flags;
     } else if (type == kCGEventKeyDown) {
         if (CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) == 0) {
-            self->audioEngine.play(keyCode, AudioEngine::PRESS);
+            self->audio.play(keyCode, Audio::PRESS);
         }
     } else if (type == kCGEventKeyUp) {
-        self->audioEngine.play(keyCode, AudioEngine::RELEASE);
+        self->audio.play(keyCode, Audio::RELEASE);
     }
     return event;
 }

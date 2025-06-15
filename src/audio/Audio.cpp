@@ -1,4 +1,4 @@
-#include "AudioEngine.hpp"
+#include "Audio.hpp"
 #include <iostream>
 #include <string>
 #include <cstring>
@@ -12,10 +12,10 @@
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
-OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {
+OSStatus Audio::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {
     static bool rtScheduled = false;
     if (!rtScheduled) {
-        AudioEngine* self = static_cast<AudioEngine*>(inRefCon);
+        Audio* self = static_cast<Audio*>(inRefCon);
         uint32_t period = static_cast<uint32_t>((inNumberFrames / self->sampleRate) * 1e9);
         uint32_t computation = period / 2;
         thread_port_t thread = pthread_mach_thread_np(pthread_self());
@@ -30,7 +30,7 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
         timebaseInitialized = true;
     }
 
-    AudioEngine* self = static_cast<AudioEngine*>(inRefCon);
+    Audio* self = static_cast<Audio*>(inRefCon);
 
     float* outL = (float*)ioData->mBuffers[0].mData;
     float* outR = (float*)ioData->mBuffers[1].mData;
@@ -80,7 +80,7 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     return noErr;
 }
 
-AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0), initialized(false) {
+Audio::Audio() : audioUnit(nullptr), channels(0), initialized(false) {
     for (int i = 0; i < COUNT; ++i) {
         nextFallbackIndex[i] = 0;
     }
@@ -92,7 +92,7 @@ AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0), initialized(false)
     nextVoiceIndex.store(0, std::memory_order_relaxed);
 }
 
-AudioEngine::~AudioEngine() {
+Audio::~Audio() {
     AudioOutputUnitStop(audioUnit);
     AudioUnitUninitialize(audioUnit);
     AudioComponentInstanceDispose(audioUnit);
@@ -106,7 +106,7 @@ AudioEngine::~AudioEngine() {
     }
 }
 
-void AudioEngine::initAudioUnit(double fileSampleRate) {
+void Audio::initAudioUnit(double fileSampleRate) {
     sampleRate = fileSampleRate;
     AudioComponentDescription desc = {};
     desc.componentType = kAudioUnitType_Output;
@@ -182,7 +182,7 @@ void AudioEngine::initAudioUnit(double fileSampleRate) {
                          sizeof(streamFormat));
 
     AURenderCallbackStruct callbackStruct = {};
-    callbackStruct.inputProc = &AudioEngine::renderCallback;
+    callbackStruct.inputProc = &Audio::renderCallback;
     callbackStruct.inputProcRefCon = this;
     AudioUnitSetProperty(audioUnit,
                          kAudioUnitProperty_SetRenderCallback,
@@ -197,7 +197,7 @@ void AudioEngine::initAudioUnit(double fileSampleRate) {
     initialized = true;
 }
 
-bool AudioEngine::loadKeySound(int keyCode, AudioEngine::SoundType type, const char* filePath) {
+bool Audio::loadKeySound(int keyCode, Audio::SoundType type, const char* filePath) {
     unsigned int fileSampleRate;
     drwav_uint64 totalFrameCount;
     float* data = drwav_open_file_and_read_pcm_frames_f32(filePath, &channels, &fileSampleRate, &totalFrameCount, NULL);
@@ -205,14 +205,14 @@ bool AudioEngine::loadKeySound(int keyCode, AudioEngine::SoundType type, const c
         std::cerr << "Error: Unable to load key sound " << filePath << std::endl;
         return false;
     }
-    explicitBuffers[type][keyCode] = AudioEngine::Buffer{ data, totalFrameCount };
+    explicitBuffers[type][keyCode] = Audio::Buffer{ data, totalFrameCount };
     if (!initialized) {
         initAudioUnit(fileSampleRate);
     }
     return true;
 }
 
-bool AudioEngine::loadFallbackSound(AudioEngine::SoundType type, const char* filePath) {
+bool Audio::loadFallbackSound(Audio::SoundType type, const char* filePath) {
     unsigned int fileSampleRate;
     drwav_uint64 totalFrameCount;
     float* data = drwav_open_file_and_read_pcm_frames_f32(filePath, &channels, &fileSampleRate, &totalFrameCount, NULL);
@@ -220,15 +220,15 @@ bool AudioEngine::loadFallbackSound(AudioEngine::SoundType type, const char* fil
         std::cerr << "Error: Unable to load fallback sound " << filePath << std::endl;
         return false;
     }
-    fallbackBuffers[type].push_back(AudioEngine::Buffer{ data, totalFrameCount });
+    fallbackBuffers[type].push_back(Audio::Buffer{ data, totalFrameCount });
     if (!initialized) {
         initAudioUnit(fileSampleRate);
     }
     return true;
 }
 
-void AudioEngine::play(int keyCode, AudioEngine::SoundType type) {
-    AudioEngine::Buffer buf;
+void Audio::play(int keyCode, Audio::SoundType type) {
+    Audio::Buffer buf;
     auto it = explicitBuffers[type].find(keyCode);
     if (it != explicitBuffers[type].end()) {
         buf = it->second;

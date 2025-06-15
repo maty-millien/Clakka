@@ -1,11 +1,11 @@
-#include "ThemeManager.hpp"
+#include "Theme.hpp"
 #include <iostream>
 #include <dirent.h>
 #include <unordered_map>
 
-ThemeManager::ThemeManager(AudioEngine& engine) : audioEngine(engine) {}
+Theme::Theme(Audio& audio) : audio(audio) {}
 
-void ThemeManager::loadThemes(const std::string& themesPath) {
+void Theme::loadThemes(const std::string& themesPath) {
     std::unordered_map<std::string, int> keyCodeMap = {
         {"back", 51}, {"enter", 36}, {"tab", 48}, {"space", 49},
         {"shift", 56}, {"ctrl", 59}, {"caps", 57}
@@ -28,15 +28,15 @@ void ThemeManager::loadThemes(const std::string& themesPath) {
             if (pos == std::string::npos) continue;
             std::string keyName = stem.substr(0, pos);
             std::string action = stem.substr(pos + 1);
-            AudioEngine::SoundType type = (action == "press") ? AudioEngine::PRESS : AudioEngine::RELEASE;
+            Audio::SoundType type = (action == "press") ? Audio::PRESS : Audio::RELEASE;
             auto it = keyCodeMap.find(keyName);
             if (it != keyCodeMap.end()) {
-                if (!audioEngine.loadKeySound(it->second, type, path.c_str())) {
+                if (!audio.loadKeySound(it->second, type, path.c_str())) {
                     closedir(dir);
                     return;
                 }
             } else if (keyName.compare(0, 3, "key") == 0) {
-                if (!audioEngine.loadFallbackSound(type, path.c_str())) {
+                if (!audio.loadFallbackSound(type, path.c_str())) {
                     closedir(dir);
                     return;
                 }

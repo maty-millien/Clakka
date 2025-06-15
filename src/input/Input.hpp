@@ -1,12 +1,12 @@
 #pragma once
 
-#include "audio/AudioEngine.hpp"
+#include "audio/Audio.hpp"
 #include <CoreGraphics/CoreGraphics.h>
 
-class InputManager {
+class Input {
 public:
-    InputManager(AudioEngine& audioEngine);
-    ~InputManager();
+    Input(Audio& audio);
+    ~Input();
 
     void start();
     void stop();
@@ -14,7 +14,7 @@ public:
 private:
     static CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void* userInfo);
 
-    AudioEngine& audioEngine;
+    Audio& audio;
     CFMachPortRef eventTap;
     CFRunLoopSourceRef runLoopSource;
 };

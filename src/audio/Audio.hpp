@@ -8,7 +8,7 @@
 
 const int MAX_VOICES = 16;
 
-class AudioEngine {
+class Audio {
 public:
     enum SoundType {
         PRESS,
@@ -16,8 +16,8 @@ public:
         COUNT
     };
 
-    AudioEngine();
-    ~AudioEngine();
+    Audio();
+    ~Audio();
 
     bool loadKeySound(int keyCode, SoundType type, const char* filePath);
     bool loadFallbackSound(SoundType type, const char* filePath);
