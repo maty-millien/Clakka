@@ -1,3 +1,5 @@
+#define DR_WAV_IMPLEMENTATION
+
 /*
 WAV audio loader and writer. Choice of public domain or MIT-0. See license statements at the end of this file.
 dr_wav - v0.14.0 - TBD
@@ -3570,7 +3572,7 @@ DRWAV_PRIVATE drwav_bool32 drwav_init__internal(drwav* pWav, drwav_chunk_proc on
                     we'll need to abort because we can't be doing a backwards seek back to the SSND chunk in order to read the
                     data. For this reason, this configuration of AIFF files are not supported with sequential mode.
                     */
-                    return DRWAV_FALSE; 
+                    return DRWAV_FALSE;
                 }
             } else {
                 chunkSize += header.paddingSize;                /* <-- Make sure we seek past the padding. */

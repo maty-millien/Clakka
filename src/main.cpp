@@ -1,14 +1,4 @@
-#include <iostream>
-#include <csignal>
-#include <atomic>
-#include <CoreGraphics/CoreGraphics.h>
-#include <CoreFoundation/CoreFoundation.h>
-#include <thread>
-#include <chrono>
-#include "AudioEngine.h"
-#include <dirent.h>
-#include <unordered_map>
-#include <string>
+#include "main.hpp"
 
 AudioEngine audioEngine;
 

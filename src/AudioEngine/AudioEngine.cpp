@@ -1,15 +1,4 @@
-#include "AudioEngine.h"
-#include <iostream>
-#include <CoreAudio/CoreAudio.h>
-#include <mach/mach_time.h>
-#include <Accelerate/Accelerate.h>
-#include <cstring>
-#include <pthread.h>
-#include <mach/thread_policy.h>
-#include <mach/thread_act.h>
-#include <vector>
-
-#define DR_WAV_IMPLEMENTATION
+#include "main.hpp"
 #include "dr_wav.h"
 
 OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {

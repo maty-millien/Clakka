@@ -1,22 +1,21 @@
 MAKEFLAGS += -sBj$(nproc)
 
 CXX = clang++
-CXXFLAGS = -std=c++17 -Wall -O3 -DNDEBUG -flto
+CXXFLAGS = -std=c++17 -Wall -O3 -DNDEBUG -flto -Ilib -Isrc
 FRAMEWORKS = -framework CoreGraphics -framework AudioToolbox -framework CoreFoundation -framework CoreAudio -framework Accelerate
 TARGET = kream_engine
-SRCDIR = src
 BUILDDIR = build
 THEMEDIR = themes/V1
-SOURCES = $(wildcard $(SRCDIR)/*.cpp)
-OBJECTS = $(SOURCES:$(SRCDIR)/%.cpp=$(BUILDDIR)/%.o)
+SOURCES = $(wildcard src/*.cpp) $(wildcard src/AudioEngine/*.cpp)
+OBJECTS = $(SOURCES:src/%.cpp=$(BUILDDIR)/%.o)
 
 all: $(BUILDDIR)/$(TARGET)
 
 $(BUILDDIR)/$(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(FRAMEWORKS)
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.cpp
-	mkdir -p $(BUILDDIR)
+$(BUILDDIR)/%.o: src/%.cpp
+	mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 run:
