@@ -29,11 +29,6 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
         mach_timebase_info(&timebaseInfo);
         timebaseInitialized = true;
     }
-    uint64_t now = mach_absolute_time();
-    uint64_t hostTime = inTimeStamp->mHostTime;
-    uint64_t nowNs = now * timebaseInfo.numer / timebaseInfo.denom;
-    uint64_t hostNs = hostTime * timebaseInfo.numer / timebaseInfo.denom;
-    int64_t deltaNs = nowNs > hostNs ? nowNs - hostNs : hostNs - nowNs;
 
     AudioEngine* self = static_cast<AudioEngine*>(inRefCon);
 
