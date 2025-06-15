@@ -1,7 +1,7 @@
 MAKEFLAGS += -sBj$(nproc)
 
 CXX = clang++
-CXXFLAGS = -std=c++17 -Wall -O3 -DNDEBUG -flto -Ilib -Isrc
+CXXFLAGS = -std=c++17 -Wall -O3 -DNDEBUG -flto -Isrc -Ilib
 FRAMEWORKS = -framework CoreGraphics -framework AudioToolbox -framework CoreFoundation -framework CoreAudio -framework Accelerate
 TARGET = kream_engine
 BUILDDIR = build
