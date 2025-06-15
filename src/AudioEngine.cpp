@@ -50,12 +50,14 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
     float* outL = (float*)ioData->mBuffers[0].mData;
     float* outR = (float*)ioData->mBuffers[1].mData;
 
-    // Copy atomic playback positions and voice types into local arrays
+    // Copy atomic playback positions and per-voice buffer pointers/counts into local arrays
     uint64_t localPositions[MAX_VOICES];
-    SoundType localTypes[MAX_VOICES];
+    float*   localBuffers[MAX_VOICES];
+    uint64_t localFrameCounts[MAX_VOICES];
     for (int v = 0; v < MAX_VOICES; ++v) {
-        localPositions[v] = self->playbackPositions[v].load(std::memory_order_relaxed);
-        localTypes[v] = self->voiceSoundTypes[v];
+        localPositions[v]    = self->playbackPositions[v].load(std::memory_order_relaxed);
+        localBuffers[v]      = self->voiceBuffers[v];
+        localFrameCounts[v]  = self->voiceBufferFrameCounts[v];
     }
 
     // Zero output buffers
@@ -64,14 +66,14 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
 
     // Vectorized mixing across voices using Accelerate
     for (int v = 0; v < MAX_VOICES; ++v) {
-        uint64_t pos = localPositions[v];
-        SoundType type = localTypes[v];
-        if (type < COUNT && self->audioBuffers[type] != nullptr) {
-            uint64_t total = self->bufferFrameCounts[type];
-            UInt32 frames = inNumberFrames;
+        uint64_t pos      = localPositions[v];
+        float*   buffer   = localBuffers[v];
+        if (buffer != nullptr) {
+            uint64_t total  = localFrameCounts[v];
+            UInt32 frames   = inNumberFrames;
             if (pos >= total) continue;
             if (pos + frames > total) frames = static_cast<UInt32>(total - pos);
-            float* buffer = self->audioBuffers[type];
+            // buffer now points to either mono or interleaved float data based on channels
             if (self->channels == 1) {
                 float* src = buffer + pos;
                 vDSP_vadd(src, 1, outL, 1, outL, 1, frames);
@@ -100,13 +102,14 @@ OSStatus AudioEngine::renderCallback(void *inRefCon, AudioUnitRenderActionFlags 
 }
 
 AudioEngine::AudioEngine() : audioUnit(nullptr), channels(0) {
+    // Initialize fallback rotation indices for each sound type
     for (int i = 0; i < COUNT; ++i) {
-        audioBuffers[i] = nullptr;
-        bufferFrameCounts[i] = 0;
+        nextFallbackIndex[i] = 0;
     }
     for (int i = 0; i < MAX_VOICES; ++i) {
         playbackPositions[i].store(UINT64_MAX, std::memory_order_relaxed);
-        voiceSoundTypes[i] = PRESS;
+        voiceBuffers[i] = nullptr;
+        voiceBufferFrameCounts[i] = 0;
     }
     nextVoiceIndex.store(0, std::memory_order_relaxed);
 
@@ -220,57 +223,66 @@ AudioEngine::~AudioEngine() {
     AudioOutputUnitStop(audioUnit);
     AudioUnitUninitialize(audioUnit);
     AudioComponentInstanceDispose(audioUnit);
-    for (int i = 0; i < COUNT; ++i) {
-        if (audioBuffers[i]) {
-            drwav_free(audioBuffers[i], NULL);
+    // Free explicit and fallback buffers
+    for (int type = 0; type < COUNT; ++type) {
+        for (auto &kv : explicitBuffers[type]) {
+            drwav_free(kv.second.data, NULL);
+        }
+        for (auto &buf : fallbackBuffers[type]) {
+            drwav_free(buf.data, NULL);
         }
     }
 }
 
-bool AudioEngine::loadWav(const char* filePath, SoundType type) {
-    unsigned int sampleRate;
+// New API implementations
+// Load a sound for a specific key code and type (press/release)
+bool AudioEngine::loadKeySound(int keyCode, AudioEngine::SoundType type, const char* filePath) {
+    unsigned int fileSampleRate;
     drwav_uint64 totalFrameCount;
-
-    if (audioBuffers[type]) {
-        drwav_free(audioBuffers[type], NULL);
-        audioBuffers[type] = nullptr;
-    }
-
-    audioBuffers[type] = drwav_open_file_and_read_pcm_frames_f32(filePath, &channels, &sampleRate, &totalFrameCount, NULL);
-
-    if (audioBuffers[type] == nullptr) {
-        std::cerr << "Erreur: Impossible de charger le fichier WAV " << filePath << std::endl;
+    float* data = drwav_open_file_and_read_pcm_frames_f32(filePath, &channels, &fileSampleRate, &totalFrameCount, NULL);
+    if (data == nullptr) {
+        std::cerr << "Error: Unable to load key sound " << filePath << std::endl;
         return false;
     }
-
-    bufferFrameCounts[type] = totalFrameCount;
-    std::cout << "Fichier " << filePath << " chargé. " << bufferFrameCounts[type] << " frames à " << sampleRate << " Hz." << std::endl;
-    AudioOutputUnitStop(audioUnit);
-    AudioUnitUninitialize(audioUnit);
-    AudioStreamBasicDescription streamFormat = {};
-    streamFormat.mSampleRate = static_cast<Float64>(sampleRate);
-    streamFormat.mFormatID = kAudioFormatLinearPCM;
-    streamFormat.mFormatFlags = kAudioFormatFlagsNativeFloatPacked | kAudioFormatFlagIsNonInterleaved;
-    streamFormat.mBytesPerPacket = sizeof(float);
-    streamFormat.mFramesPerPacket = 1;
-    streamFormat.mBytesPerFrame = sizeof(float);
-    streamFormat.mChannelsPerFrame = 2;
-    streamFormat.mBitsPerChannel = 8 * sizeof(float);
-
-    // Preserve low-latency setting across re-initialisation.
-    UInt32 reloadFrameSize = 64;
-    AudioUnitSetProperty(audioUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &reloadFrameSize, sizeof(reloadFrameSize));
-    AudioUnitSetProperty(audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &streamFormat, sizeof(streamFormat));
-
-    // Update sample rate and reinitialize audio unit
-    this->sampleRate = sampleRate;
-    AudioUnitInitialize(audioUnit);
-    AudioOutputUnitStart(audioUnit);
+    explicitBuffers[type][keyCode] = AudioEngine::Buffer{ data, totalFrameCount };
     return true;
 }
 
-void AudioEngine::play(SoundType type) {
+// Load a fallback sound to cycle through when no explicit key sound is set
+bool AudioEngine::loadFallbackSound(AudioEngine::SoundType type, const char* filePath) {
+    unsigned int fileSampleRate;
+    drwav_uint64 totalFrameCount;
+    float* data = drwav_open_file_and_read_pcm_frames_f32(filePath, &channels, &fileSampleRate, &totalFrameCount, NULL);
+    if (data == nullptr) {
+        std::cerr << "Error: Unable to load fallback sound " << filePath << std::endl;
+        return false;
+    }
+    fallbackBuffers[type].push_back(AudioEngine::Buffer{ data, totalFrameCount });
+    return true;
+}
+
+// Play the sound associated with a key code and type
+void AudioEngine::play(int keyCode, AudioEngine::SoundType type) {
+    AudioEngine::Buffer buf;
+    auto it = explicitBuffers[type].find(keyCode);
+    if (it != explicitBuffers[type].end()) {
+        buf = it->second;
+    } else if (!fallbackBuffers[type].empty()) {
+        size_t idx;
+        auto kit = keyFallbackMap.find(keyCode);
+        if (kit == keyFallbackMap.end()) {
+            idx = nextFallbackIndex[type] % fallbackBuffers[type].size();
+            keyFallbackMap[keyCode] = idx;
+            nextFallbackIndex[type] = (idx + 1) % fallbackBuffers[type].size();
+        } else {
+            idx = kit->second;
+        }
+        buf = fallbackBuffers[type][idx];
+    } else {
+        return;
+    }
     int voiceIndex = nextVoiceIndex.fetch_add(1, std::memory_order_relaxed) % MAX_VOICES;
-    voiceSoundTypes[voiceIndex] = type;
+    voiceBuffers[voiceIndex] = buf.data;
+    voiceBufferFrameCounts[voiceIndex] = buf.frameCount;
     playbackPositions[voiceIndex].store(0, std::memory_order_relaxed);
 }

@@ -6,7 +6,9 @@
 #include <thread>
 #include <chrono>
 #include "AudioEngine.h"
-
+#include <dirent.h>
+#include <unordered_map>
+#include <string>
 
 AudioEngine audioEngine;
 std::atomic<bool> shouldExit(false);
@@ -19,52 +21,52 @@ void signalHandler(int signum) {
 
 CGEventRef keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
     static CGEventFlags lastFlags = CGEventGetFlags(event);
+    int keyCode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
     if (type == kCGEventFlagsChanged) {
         CGEventFlags flags = CGEventGetFlags(event);
         CGEventFlags changed = flags ^ lastFlags;
         if (changed & kCGEventFlagMaskShift) {
             if (flags & kCGEventFlagMaskShift)
-                audioEngine.play(AudioEngine::PRESS);
+                audioEngine.play(keyCode, AudioEngine::PRESS);
             else
-                audioEngine.play(AudioEngine::RELEASE);
+                audioEngine.play(keyCode, AudioEngine::RELEASE);
         }
         if (changed & kCGEventFlagMaskControl) {
             if (flags & kCGEventFlagMaskControl)
-                audioEngine.play(AudioEngine::PRESS);
+                audioEngine.play(keyCode, AudioEngine::PRESS);
             else
-                audioEngine.play(AudioEngine::RELEASE);
+                audioEngine.play(keyCode, AudioEngine::RELEASE);
         }
         if (changed & kCGEventFlagMaskAlternate) {
             if (flags & kCGEventFlagMaskAlternate)
-                audioEngine.play(AudioEngine::PRESS);
+                audioEngine.play(keyCode, AudioEngine::PRESS);
             else
-                audioEngine.play(AudioEngine::RELEASE);
+                audioEngine.play(keyCode, AudioEngine::RELEASE);
         }
         if (changed & kCGEventFlagMaskCommand) {
             if (flags & kCGEventFlagMaskCommand)
-                audioEngine.play(AudioEngine::PRESS);
+                audioEngine.play(keyCode, AudioEngine::PRESS);
             else
-                audioEngine.play(AudioEngine::RELEASE);
+                audioEngine.play(keyCode, AudioEngine::RELEASE);
         }
         if (changed & kCGEventFlagMaskAlphaShift) {
-            // Caps Lock is a toggle: play both press and release as a normal key press
-            audioEngine.play(AudioEngine::PRESS);
+            audioEngine.play(keyCode, AudioEngine::PRESS);
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            audioEngine.play(AudioEngine::RELEASE);
+            audioEngine.play(keyCode, AudioEngine::RELEASE);
         }
         if (changed & kCGEventFlagMaskSecondaryFn) {
             if (flags & kCGEventFlagMaskSecondaryFn)
-                audioEngine.play(AudioEngine::PRESS);
+                audioEngine.play(keyCode, AudioEngine::PRESS);
             else
-                audioEngine.play(AudioEngine::RELEASE);
+                audioEngine.play(keyCode, AudioEngine::RELEASE);
         }
         lastFlags = flags;
     } else if (type == kCGEventKeyDown) {
         if (CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) == 0) {
-            audioEngine.play(AudioEngine::PRESS);
+            audioEngine.play(keyCode, AudioEngine::PRESS);
         }
     } else if (type == kCGEventKeyUp) {
-        audioEngine.play(AudioEngine::RELEASE);
+        audioEngine.play(keyCode, AudioEngine::RELEASE);
     }
     return event;
 }
@@ -73,11 +75,41 @@ int main(int argc, const char * argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    if (!audioEngine.loadWav("../res/key_press.wav", AudioEngine::PRESS)) {
-        return 1;
-    }
-    if (!audioEngine.loadWav("../res/key_release.wav", AudioEngine::RELEASE)) {
-        return 1;
+    // Load theme sounds (build-run copies WAVs into build/ so scan both current dir and themes/V1)
+    std::unordered_map<std::string, int> keyCodeMap = {
+        {"back", 51}, {"enter", 36}, {"tab", 48}, {"space", 49},
+        {"shift", 56}, {"ctrl", 59}, {"caps", 57}
+    };
+    std::string themeDirs[] = {".", "themes/V1"};
+    for (const auto &themeDir : themeDirs) {
+        DIR* dir = opendir(themeDir.c_str());
+        if (!dir) continue;
+        struct dirent* ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (ent->d_type != DT_REG) continue;
+            std::string name(ent->d_name);
+            if (name.size() < 5 || name.substr(name.size() - 4) != ".wav") continue;
+            std::string path = themeDir + "/" + name;
+            std::string stem = name.substr(0, name.size() - 4);
+            auto pos = stem.rfind('_');
+            if (pos == std::string::npos) continue;
+            std::string keyName = stem.substr(0, pos);
+            std::string action = stem.substr(pos + 1);
+            AudioEngine::SoundType type = (action == "press") ? AudioEngine::PRESS : AudioEngine::RELEASE;
+            auto it = keyCodeMap.find(keyName);
+            if (it != keyCodeMap.end()) {
+                if (!audioEngine.loadKeySound(it->second, type, path.c_str())) {
+                    closedir(dir);
+                    return 1;
+                }
+            } else if (keyName.compare(0, 3, "key") == 0) {
+                if (!audioEngine.loadFallbackSound(type, path.c_str())) {
+                    closedir(dir);
+                    return 1;
+                }
+            }
+        }
+        closedir(dir);
     }
 
     CFMachPortRef eventTap = CGEventTapCreate(

@@ -21,7 +21,7 @@ TARGET = kream_engine
 # Les répertoires de votre projet.
 SRCDIR = src
 BUILDDIR = build
-RESDIR = res
+THEMEDIR = themes/V1
 
 # Trouve automatiquement tous les fichiers .cpp dans le répertoire src.
 # Si vous ajoutez un nouveau fichier .cpp dans src/, vous n'aurez pas à modifier ce Makefile !
@@ -57,14 +57,14 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp
 
 # La règle magique pour compiler ET lancer en une seule commande !
 # Dépend de 'all', donc 'make' sera exécuté d'abord pour s'assurer que tout est à jour.
-run: all
-	@echo "🚀  Lancement de Kream..."
-	@cp -r $(RESDIR)/* $(BUILDDIR)/
+run:
+	$(MAKE) clean
+	$(MAKE) all
+	@cp -r $(THEMEDIR)/* $(BUILDDIR)/
 	@cd $(BUILDDIR) && ./$(TARGET)
 
 # Une règle pour nettoyer le projet (supprimer les fichiers compilés).
 clean:
-	@echo "Nettoyage du projet..."
 	rm -rf $(BUILDDIR)
 
 # Indique à 'make' que 'all', 'run', et 'clean' ne sont pas des noms de fichiers.
