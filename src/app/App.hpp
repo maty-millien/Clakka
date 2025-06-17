@@ -1,9 +1,10 @@
 #pragma once
 
+#include <csignal>
+
 #include "audio/Audio.hpp"
 #include "theme/Theme.hpp"
 #include "input/Input.hpp"
-#include <csignal>
 
 class App {
 public:

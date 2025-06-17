@@ -1,6 +1,7 @@
-#include "App.hpp"
 #include <iostream>
 #include <CoreFoundation/CoreFoundation.h>
+
+#include "App.hpp"
 
 volatile sig_atomic_t App::running = true;
 
@@ -19,12 +20,9 @@ void App::run() {
 
     std::cout << "Kream engine started. Press keys... (Ctrl+C to quit)" << std::endl;
 
-    while(running) {
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
-    }
+    while(running) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
 
     Input.stop();
-
     std::cout << "Kream engine stopped." << std::endl;
 }
 
