@@ -33,7 +33,7 @@ void App::signalHandler(int signum) {
     }
 }
 
-int main(int argc, const char * argv[]) {
+int main(void) {
     App app;
     app.run();
     return 0;
