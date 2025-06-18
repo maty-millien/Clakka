@@ -1,4 +1,3 @@
-#include "Audio.hpp"
 #include <iostream>
 #include <string>
 #include <cstring>
@@ -8,6 +7,8 @@
 #include <pthread.h>
 #include <mach/thread_policy.h>
 #include <mach/thread_act.h>
+
+#include "Audio.hpp"
 
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"

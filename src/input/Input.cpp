@@ -1,8 +1,9 @@
-#include "Input.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
 #include <CoreFoundation/CoreFoundation.h>
+
+#include "Input.hpp"
 
 Input::Input(Audio& audio) : audio(audio), eventTap(nullptr), runLoopSource(nullptr) {}
 
