@@ -1,6 +1,8 @@
+# CMake configuration
 cmake_minimum_required(VERSION 3.10)
 project(kream_engine VERSION 1.0 LANGUAGES CXX)
 
+# Set build type
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -13,7 +15,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Compiler flags
-add_compile_options(-W -Werror -Wall -Wextra -O3 -ffast-math -march=native -DNDEBUG -flto -funroll-loops)
+add_compile_options(-Werror -Wall -O3 -ffast-math -march=native -DNDEBUG -flto -funroll-loops)
 
 # Include directories
 include_directories(
