@@ -4,6 +4,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <CoreFoundation/CoreFoundation.h>
+#include <mach/mach_time.h>
 
 #include "Input.h"
 
@@ -52,6 +53,7 @@ void Input::stop() {
 }
 
 CGEventRef Input::keyboardCallback(CGEventTapProxy, CGEventType type, CGEventRef event, void *userInfo) {
+    uint64_t eventTime = mach_absolute_time();
     Input* self = static_cast<Input*>(userInfo);
 
     static CGEventFlags lastFlags = CGEventGetFlags(event);
@@ -63,7 +65,7 @@ CGEventRef Input::keyboardCallback(CGEventTapProxy, CGEventType type, CGEventRef
         // Handle standard modifier keys (Shift, Control, Alt, Cmd, Fn)
         for (CGEventFlags mask : kModifierMasks) {
             if (changed & mask) {
-                self->audio.play(keyCode, (flags & mask) ? Audio::PRESS : Audio::RELEASE);
+                self->audio.play(keyCode, (flags & mask) ? Audio::PRESS : Audio::RELEASE, eventTime);
             }
         }
 
@@ -71,18 +73,18 @@ CGEventRef Input::keyboardCallback(CGEventTapProxy, CGEventType type, CGEventRef
         // press/release events like other modifiers). We simulate both press and release
         // sounds with a short delay to provide complete audio feedback for the key action.
         if (changed & kCGEventFlagMaskAlphaShift) {
-            self->audio.play(keyCode, Audio::PRESS);
+            self->audio.play(keyCode, Audio::PRESS, eventTime);
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            self->audio.play(keyCode, Audio::RELEASE);
+            self->audio.play(keyCode, Audio::RELEASE, mach_absolute_time());
         }
 
         lastFlags = flags;
     } else if (type == kCGEventKeyDown) {
         if (CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) == 0) {
-            self->audio.play(keyCode, Audio::PRESS);
+            self->audio.play(keyCode, Audio::PRESS, eventTime);
         }
     } else if (type == kCGEventKeyUp) {
-        self->audio.play(keyCode, Audio::RELEASE);
+        self->audio.play(keyCode, Audio::RELEASE, eventTime);
     }
     return event;
 }

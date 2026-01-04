@@ -22,7 +22,7 @@ public:
 
     bool loadKeySound(int keyCode, SoundType type, const char* filePath);
     bool loadFallbackSound(SoundType type, const char* filePath);
-    void play(int keyCode, SoundType type);
+    void play(int keyCode, SoundType type, uint64_t eventTime = 0);
 
 private:
     AudioUnit audioUnit;

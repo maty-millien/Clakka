@@ -250,7 +250,7 @@ bool Audio::loadFallbackSound(Audio::SoundType type, const char* filePath) {
     return true;
 }
 
-void Audio::play(int keyCode, Audio::SoundType type) {
+void Audio::play(int keyCode, Audio::SoundType type, uint64_t eventTime) {
     Audio::Buffer buf;
     auto it = explicitBuffers[type].find(keyCode);
     if (it != explicitBuffers[type].end()) {
@@ -267,4 +267,20 @@ void Audio::play(int keyCode, Audio::SoundType type) {
     voices[voiceIndex].buffer = buf.data;
     voices[voiceIndex].frameCount = buf.frameCount;
     voices[voiceIndex].position.store(0, std::memory_order_relaxed);
+
+    // Log latency from key event to voice allocation
+    if (eventTime != 0) {
+        uint64_t now = mach_absolute_time();
+        static mach_timebase_info_data_t timebase = {0, 0};
+        if (timebase.denom == 0) {
+            mach_timebase_info(&timebase);
+        }
+        double latencyUs = (double)(now - eventTime) * timebase.numer / timebase.denom / 1000.0;
+        // Buffer latency adds ~128 frames / sampleRate seconds (~2.7ms at 48kHz)
+        double bufferLatencyMs = (128.0 / sampleRate) * 1000.0;
+        std::cerr << "[Latency] key=" << keyCode
+                  << " type=" << (type == PRESS ? "press" : "release")
+                  << " software=" << latencyUs << "µs"
+                  << " +buffer≈" << bufferLatencyMs << "ms" << std::endl;
+    }
 }
