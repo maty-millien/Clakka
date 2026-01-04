@@ -37,7 +37,7 @@ add_executable(kream_engine)
 # Explicitly list sources. NEVER use GLOB/GLOB_RECURSE.
 # It ensures the build system detects file additions/removals deterministically.
 target_sources(kream_engine PRIVATE
-    src/main/Main.cpp
+    src/Main.cpp
     src/audio/Audio.cpp
     src/theme/Theme.cpp
     src/input/Input.cpp
