@@ -2,13 +2,13 @@
 
 #include <csignal>
 
-#include "audio/Audio.hpp"
-#include "theme/Theme.hpp"
-#include "input/Input.hpp"
+#include "audio/Audio.h"
+#include "theme/Theme.h"
+#include "input/Input.h"
 
-class App {
+class Main {
 public:
-    App();
+    Main();
     void run();
 
 private:

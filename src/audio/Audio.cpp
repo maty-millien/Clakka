@@ -1,5 +1,4 @@
 #include <iostream>
-#include <string>
 #include <cstring>
 #include <CoreAudio/CoreAudio.h>
 #include <mach/mach_time.h>
@@ -8,12 +7,12 @@
 #include <mach/thread_policy.h>
 #include <mach/thread_act.h>
 
-#include "Audio.hpp"
+#include "Audio.h"
 
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
-OSStatus Audio::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags, const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber, UInt32 inNumberFrames, AudioBufferList *ioData) {
+OSStatus Audio::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32 inNumberFrames, AudioBufferList *ioData) {
     static bool rtScheduled = false;
     if (!rtScheduled) {
         Audio* self = static_cast<Audio*>(inRefCon);

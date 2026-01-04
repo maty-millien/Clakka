@@ -1,4 +1,4 @@
-#include "Theme.hpp"
+#include "Theme.h"
 #include <iostream>
 #include <dirent.h>
 #include <unordered_map>

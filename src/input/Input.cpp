@@ -3,7 +3,7 @@
 #include <chrono>
 #include <CoreFoundation/CoreFoundation.h>
 
-#include "Input.hpp"
+#include "Input.h"
 
 Input::Input(Audio& audio) : audio(audio), eventTap(nullptr), runLoopSource(nullptr) {}
 
@@ -39,7 +39,7 @@ void Input::stop() {
     }
 }
 
-CGEventRef Input::keyboardCallback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo) {
+CGEventRef Input::keyboardCallback(CGEventTapProxy, CGEventType type, CGEventRef event, void *userInfo) {
     Input* self = static_cast<Input*>(userInfo);
 
     static CGEventFlags lastFlags = CGEventGetFlags(event);

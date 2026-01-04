@@ -1,18 +1,18 @@
 #include <iostream>
 #include <CoreFoundation/CoreFoundation.h>
 
-#include "App.hpp"
+#include "Main.h"
 
-volatile sig_atomic_t App::running = true;
+volatile sig_atomic_t Main::running = true;
 
-App::App()
+Main::Main()
     : Audio(),
       Theme(Audio),
       Input(Audio) {
-    signal(SIGINT, App::signalHandler);
+    signal(SIGINT, Main::signalHandler);
 }
 
-void App::run() {
+void Main::run() {
     std::cout << "Kream engine starting..." << std::endl;
 
     Theme.loadThemes("assets/themes");
@@ -26,15 +26,14 @@ void App::run() {
     std::cout << "Kream engine stopped." << std::endl;
 }
 
-void App::signalHandler(int signum) {
+void Main::signalHandler(int signum) {
     if (signum == SIGINT) {
         running = false;
         CFRunLoopStop(CFRunLoopGetCurrent());
     }
 }
 
-int main(void) {
-    App app;
-    app.run();
-    return 0;
+int main() {
+    Main main;
+    main.run();
 }
