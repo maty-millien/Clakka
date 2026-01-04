@@ -3,11 +3,12 @@
 #include "audio/Audio.h"
 #include <string>
 
-class Theme {
-public:
-    Theme(Audio& audio);
-    void loadThemes(const std::string& themesPath);
+namespace Theme {
 
-private:
-    Audio& audio;
-};
+/// Load sound themes from the specified themes directory.
+/// Scans for WAV files and registers them with the Audio engine.
+/// Returns true if all sounds loaded successfully, false if any failed.
+/// Continues loading remaining sounds even if some fail.
+bool loadThemes(Audio& audio, const std::string& themesPath);
+
+} // namespace Theme

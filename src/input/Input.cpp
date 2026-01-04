@@ -1,9 +1,22 @@
 #include <iostream>
+#include <array>
 #include <thread>
 #include <chrono>
+#include <stdexcept>
 #include <CoreFoundation/CoreFoundation.h>
 
 #include "Input.h"
+
+namespace {
+    // Modifier key masks for standard press/release behavior
+    constexpr std::array<CGEventFlags, 5> kModifierMasks = {
+        kCGEventFlagMaskShift,
+        kCGEventFlagMaskControl,
+        kCGEventFlagMaskAlternate,
+        kCGEventFlagMaskCommand,
+        kCGEventFlagMaskSecondaryFn
+    };
+}
 
 Input::Input(Audio& audio) : audio(audio), eventTap(nullptr), runLoopSource(nullptr) {}
 
@@ -19,8 +32,7 @@ void Input::start() {
     );
 
     if (!eventTap) {
-        std::cerr << "Error: Failed to create event tap. Check Accessibility permissions." << std::endl;
-        exit(1);
+        throw std::runtime_error("Failed to create event tap. Check Accessibility permissions.");
     }
 
     runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0);
@@ -47,41 +59,23 @@ CGEventRef Input::keyboardCallback(CGEventTapProxy, CGEventType type, CGEventRef
     if (type == kCGEventFlagsChanged) {
         CGEventFlags flags = CGEventGetFlags(event);
         CGEventFlags changed = flags ^ lastFlags;
-        if (changed & kCGEventFlagMaskShift) {
-            if (flags & kCGEventFlagMaskShift)
-                self->audio.play(keyCode, Audio::PRESS);
-            else
-                self->audio.play(keyCode, Audio::RELEASE);
+
+        // Handle standard modifier keys (Shift, Control, Alt, Cmd, Fn)
+        for (CGEventFlags mask : kModifierMasks) {
+            if (changed & mask) {
+                self->audio.play(keyCode, (flags & mask) ? Audio::PRESS : Audio::RELEASE);
+            }
         }
-        if (changed & kCGEventFlagMaskControl) {
-            if (flags & kCGEventFlagMaskControl)
-                self->audio.play(keyCode, Audio::PRESS);
-            else
-                self->audio.play(keyCode, Audio::RELEASE);
-        }
-        if (changed & kCGEventFlagMaskAlternate) {
-            if (flags & kCGEventFlagMaskAlternate)
-                self->audio.play(keyCode, Audio::PRESS);
-            else
-                self->audio.play(keyCode, Audio::RELEASE);
-        }
-        if (changed & kCGEventFlagMaskCommand) {
-            if (flags & kCGEventFlagMaskCommand)
-                self->audio.play(keyCode, Audio::PRESS);
-            else
-                self->audio.play(keyCode, Audio::RELEASE);
-        }
+
+        // CapsLock is a toggle key - it generates only one event per press (not separate
+        // press/release events like other modifiers). We simulate both press and release
+        // sounds with a short delay to provide complete audio feedback for the key action.
         if (changed & kCGEventFlagMaskAlphaShift) {
             self->audio.play(keyCode, Audio::PRESS);
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             self->audio.play(keyCode, Audio::RELEASE);
         }
-        if (changed & kCGEventFlagMaskSecondaryFn) {
-            if (flags & kCGEventFlagMaskSecondaryFn)
-                self->audio.play(keyCode, Audio::PRESS);
-            else
-                self->audio.play(keyCode, Audio::RELEASE);
-        }
+
         lastFlags = flags;
     } else if (type == kCGEventKeyDown) {
         if (CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) == 0) {

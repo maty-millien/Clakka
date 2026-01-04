@@ -13,35 +13,30 @@
 #include "dr_wav.h"
 
 OSStatus Audio::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *, const AudioTimeStamp *, UInt32, UInt32 inNumberFrames, AudioBufferList *ioData) {
+    Audio* self = static_cast<Audio*>(inRefCon);
+
+    // Configure real-time thread scheduling on first callback invocation.
+    // This must happen on the audio thread (not during initAudioUnit) because
+    // thread_policy_set applies to the calling thread.
     static bool rtScheduled = false;
     if (!rtScheduled) {
-        Audio* self = static_cast<Audio*>(inRefCon);
-        uint32_t period = static_cast<uint32_t>((inNumberFrames / self->sampleRate) * 1e9);
-        uint32_t computation = period / 2;
-        thread_port_t thread = pthread_mach_thread_np(pthread_self());
-        thread_time_constraint_policy_data_t policy = { period, computation, period, 0 };
-        thread_policy_set(thread, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&policy, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+        self->setupRealtimeThread(inNumberFrames);
         rtScheduled = true;
     }
-    static mach_timebase_info_data_t timebaseInfo;
-    static bool timebaseInitialized = false;
-    if (!timebaseInitialized) {
-        mach_timebase_info(&timebaseInfo);
-        timebaseInitialized = true;
-    }
-
-    Audio* self = static_cast<Audio*>(inRefCon);
 
     float* outL = (float*)ioData->mBuffers[0].mData;
     float* outR = (float*)ioData->mBuffers[1].mData;
 
+    // Cache atomic values locally to avoid repeated atomic loads in the tight mixing loop.
+    // Each atomic load has memory ordering overhead, so we load once per voice and work
+    // with the local copy throughout the render callback.
     uint64_t localPositions[MAX_VOICES];
     float*   localBuffers[MAX_VOICES];
     uint64_t localFrameCounts[MAX_VOICES];
     for (int v = 0; v < MAX_VOICES; ++v) {
-        localPositions[v]    = self->playbackPositions[v].load(std::memory_order_relaxed);
-        localBuffers[v]      = self->voiceBuffers[v];
-        localFrameCounts[v]  = self->voiceBufferFrameCounts[v];
+        localPositions[v]    = self->voices[v].position.load(std::memory_order_relaxed);
+        localBuffers[v]      = self->voices[v].buffer;
+        localFrameCounts[v]  = self->voices[v].frameCount;
     }
 
     memset(outL, 0, sizeof(float) * inNumberFrames);
@@ -74,7 +69,7 @@ OSStatus Audio::renderCallback(void *inRefCon, AudioUnitRenderActionFlags *, con
     vDSP_vclip(outR, 1, &clipMin, &clipMax, outR, 1, inNumberFrames);
 
     for (int v = 0; v < MAX_VOICES; ++v) {
-        self->playbackPositions[v].store(localPositions[v], std::memory_order_relaxed);
+        self->voices[v].position.store(localPositions[v], std::memory_order_relaxed);
     }
 
     return noErr;
@@ -85,17 +80,19 @@ Audio::Audio() : audioUnit(nullptr), channels(0), initialized(false) {
         nextFallbackIndex[i] = 0;
     }
     for (int i = 0; i < MAX_VOICES; ++i) {
-        playbackPositions[i].store(UINT64_MAX, std::memory_order_relaxed);
-        voiceBuffers[i] = nullptr;
-        voiceBufferFrameCounts[i] = 0;
+        voices[i].position.store(VOICE_IDLE, std::memory_order_relaxed);
+        voices[i].buffer = nullptr;
+        voices[i].frameCount = 0;
     }
     nextVoiceIndex.store(0, std::memory_order_relaxed);
 }
 
 Audio::~Audio() {
-    AudioOutputUnitStop(audioUnit);
-    AudioUnitUninitialize(audioUnit);
-    AudioComponentInstanceDispose(audioUnit);
+    if (audioUnit) {
+        AudioOutputUnitStop(audioUnit);
+        AudioUnitUninitialize(audioUnit);
+        AudioComponentInstanceDispose(audioUnit);
+    }
     for (int type = 0; type < COUNT; ++type) {
         for (auto &kv : explicitBuffers[type]) {
             drwav_free(kv.second.data, NULL);
@@ -106,7 +103,15 @@ Audio::~Audio() {
     }
 }
 
-void Audio::initAudioUnit(double fileSampleRate) {
+void Audio::setupRealtimeThread(UInt32 bufferFrames) {
+    uint32_t period = static_cast<uint32_t>((bufferFrames / sampleRate) * 1e9);
+    uint32_t computation = period / 2;
+    thread_port_t thread = pthread_mach_thread_np(pthread_self());
+    thread_time_constraint_policy_data_t policy = { period, computation, period, 0 };
+    thread_policy_set(thread, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&policy, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+}
+
+bool Audio::initAudioUnit(double fileSampleRate) {
     sampleRate = fileSampleRate;
     AudioComponentDescription desc = {};
     desc.componentType = kAudioUnitType_Output;
@@ -116,12 +121,27 @@ void Audio::initAudioUnit(double fileSampleRate) {
     desc.componentManufacturer = kAudioUnitManufacturer_Apple;
 
     AudioComponent outputComponent = AudioComponentFindNext(nullptr, &desc);
-    AudioComponentInstanceNew(outputComponent, &audioUnit);
+    if (!outputComponent) {
+        std::cerr << "Error: Failed to find HAL output audio component" << std::endl;
+        return false;
+    }
+
+    OSStatus status = AudioComponentInstanceNew(outputComponent, &audioUnit);
+    if (status != noErr) {
+        std::cerr << "Error: Failed to create audio unit instance (OSStatus " << status << ")" << std::endl;
+        return false;
+    }
 
     AudioDeviceID deviceID = 0;
     UInt32 size = sizeof(deviceID);
     AudioObjectPropertyAddress addr = { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &deviceID);
+    status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &deviceID);
+    if (status != noErr) {
+        std::cerr << "Error: Failed to get default audio output device (OSStatus " << status << ")" << std::endl;
+        AudioComponentInstanceDispose(audioUnit);
+        audioUnit = nullptr;
+        return false;
+    }
 
     AudioUnitSetProperty(audioUnit,
                          kAudioOutputUnitProperty_CurrentDevice,
@@ -130,34 +150,18 @@ void Audio::initAudioUnit(double fileSampleRate) {
                          &deviceID,
                          sizeof(deviceID));
 
-    AudioValueRange bufferSizeRange;
-    UInt32 rangeSize = sizeof(bufferSizeRange);
-    addr.mSelector = kAudioDevicePropertyBufferFrameSizeRange;
-    addr.mScope    = kAudioObjectPropertyScopeGlobal;
-    if (AudioObjectGetPropertyData(deviceID, &addr, 0, nullptr, &rangeSize, &bufferSizeRange) == noErr) {
-        UInt32 minBufferSize = static_cast<UInt32>(bufferSizeRange.mMinimum);
-        std::cout << "Setting HAL buffer size to " << minBufferSize << " frames" << std::endl;
-        addr.mSelector = kAudioDevicePropertyBufferFrameSize;
-        AudioObjectSetPropertyData(deviceID, &addr, 0, nullptr, sizeof(minBufferSize), &minBufferSize);
-
-        AudioUnitSetProperty(audioUnit,
-                            kAudioUnitProperty_MaximumFramesPerSlice,
-                            kAudioUnitScope_Global,
-                            0,
-                            &minBufferSize,
-                            sizeof(minBufferSize));
-    } else {
-        std::cerr << "Warning: Could not get buffer size range, using default 64 frames" << std::endl;
-        UInt32 defaultBufferSize = 64;
-        addr.mSelector = kAudioDevicePropertyBufferFrameSize;
-        AudioObjectSetPropertyData(deviceID, &addr, 0, nullptr, sizeof(defaultBufferSize), &defaultBufferSize);
-        AudioUnitSetProperty(audioUnit,
-                            kAudioUnitProperty_MaximumFramesPerSlice,
-                            kAudioUnitScope_Global,
-                            0,
-                            &defaultBufferSize,
-                            sizeof(defaultBufferSize));
-    }
+    // Use a reasonable default buffer size. A keyboard audio engine doesn't need
+    // ultra-low latency optimization - 128 frames (~2.7ms at 48kHz) is sufficient.
+    static constexpr UInt32 DEFAULT_BUFFER_SIZE = 128;
+    addr.mSelector = kAudioDevicePropertyBufferFrameSize;
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    AudioObjectSetPropertyData(deviceID, &addr, 0, nullptr, sizeof(DEFAULT_BUFFER_SIZE), &DEFAULT_BUFFER_SIZE);
+    AudioUnitSetProperty(audioUnit,
+                        kAudioUnitProperty_MaximumFramesPerSlice,
+                        kAudioUnitScope_Global,
+                        0,
+                        &DEFAULT_BUFFER_SIZE,
+                        sizeof(DEFAULT_BUFFER_SIZE));
 
     UInt32 enableIO = 0;
     AudioUnitSetProperty(audioUnit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input,  1, &enableIO, sizeof(enableIO));
@@ -191,10 +195,25 @@ void Audio::initAudioUnit(double fileSampleRate) {
                          &callbackStruct,
                          sizeof(callbackStruct));
 
-    AudioUnitInitialize(audioUnit);
-    AudioOutputUnitStart(audioUnit);
+    status = AudioUnitInitialize(audioUnit);
+    if (status != noErr) {
+        std::cerr << "Error: Failed to initialize audio unit (OSStatus " << status << ")" << std::endl;
+        AudioComponentInstanceDispose(audioUnit);
+        audioUnit = nullptr;
+        return false;
+    }
+
+    status = AudioOutputUnitStart(audioUnit);
+    if (status != noErr) {
+        std::cerr << "Error: Failed to start audio unit (OSStatus " << status << ")" << std::endl;
+        AudioUnitUninitialize(audioUnit);
+        AudioComponentInstanceDispose(audioUnit);
+        audioUnit = nullptr;
+        return false;
+    }
 
     initialized = true;
+    return true;
 }
 
 bool Audio::loadKeySound(int keyCode, Audio::SoundType type, const char* filePath) {
@@ -207,7 +226,9 @@ bool Audio::loadKeySound(int keyCode, Audio::SoundType type, const char* filePat
     }
     explicitBuffers[type][keyCode] = Audio::Buffer{ data, totalFrameCount };
     if (!initialized) {
-        initAudioUnit(fileSampleRate);
+        if (!initAudioUnit(fileSampleRate)) {
+            return false;
+        }
     }
     return true;
 }
@@ -222,7 +243,9 @@ bool Audio::loadFallbackSound(Audio::SoundType type, const char* filePath) {
     }
     fallbackBuffers[type].push_back(Audio::Buffer{ data, totalFrameCount });
     if (!initialized) {
-        initAudioUnit(fileSampleRate);
+        if (!initAudioUnit(fileSampleRate)) {
+            return false;
+        }
     }
     return true;
 }
@@ -233,21 +256,15 @@ void Audio::play(int keyCode, Audio::SoundType type) {
     if (it != explicitBuffers[type].end()) {
         buf = it->second;
     } else if (!fallbackBuffers[type].empty()) {
-        size_t idx;
-        auto kit = keyFallbackMap.find(keyCode);
-        if (kit == keyFallbackMap.end()) {
-            idx = nextFallbackIndex[type] % fallbackBuffers[type].size();
-            keyFallbackMap[keyCode] = idx;
-            nextFallbackIndex[type] = (idx + 1) % fallbackBuffers[type].size();
-        } else {
-            idx = kit->second;
-        }
+        // Simple round-robin through fallback sounds
+        size_t idx = nextFallbackIndex[type] % fallbackBuffers[type].size();
+        nextFallbackIndex[type] = (idx + 1) % fallbackBuffers[type].size();
         buf = fallbackBuffers[type][idx];
     } else {
         return;
     }
     int voiceIndex = nextVoiceIndex.fetch_add(1, std::memory_order_relaxed) % MAX_VOICES;
-    voiceBuffers[voiceIndex] = buf.data;
-    voiceBufferFrameCounts[voiceIndex] = buf.frameCount;
-    playbackPositions[voiceIndex].store(0, std::memory_order_relaxed);
+    voices[voiceIndex].buffer = buf.data;
+    voices[voiceIndex].frameCount = buf.frameCount;
+    voices[voiceIndex].position.store(0, std::memory_order_relaxed);
 }

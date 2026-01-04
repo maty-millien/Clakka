@@ -6,7 +6,8 @@
 #include <atomic>
 #include <cstdint>
 
-const int MAX_VOICES = 16;
+static constexpr int MAX_VOICES = 16;
+static constexpr uint64_t VOICE_IDLE = UINT64_MAX;
 
 class Audio {
 public:
@@ -33,17 +34,20 @@ private:
     };
     std::unordered_map<int, Buffer> explicitBuffers[COUNT];
     std::vector<Buffer> fallbackBuffers[COUNT];
-    std::unordered_map<int, size_t> keyFallbackMap;
     size_t nextFallbackIndex[COUNT];
 
-    std::atomic<uint64_t> playbackPositions[MAX_VOICES];
-    float* voiceBuffers[MAX_VOICES];
-    uint64_t voiceBufferFrameCounts[MAX_VOICES];
+    struct Voice {
+        std::atomic<uint64_t> position;
+        float* buffer;
+        uint64_t frameCount;
+    };
+    Voice voices[MAX_VOICES];
     std::atomic<int> nextVoiceIndex;
     double sampleRate;
     bool initialized;
 
-    void initAudioUnit(double fileSampleRate);
+    bool initAudioUnit(double fileSampleRate);
+    void setupRealtimeThread(UInt32 bufferFrames);
 
     static OSStatus renderCallback(void *inRefCon,
                                    AudioUnitRenderActionFlags *ioActionFlags,

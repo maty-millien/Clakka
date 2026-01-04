@@ -1,13 +1,15 @@
 #include <iostream>
+#include <stdexcept>
+#include <cstdlib>
 #include <CoreFoundation/CoreFoundation.h>
 
 #include "Main.h"
+#include "theme/Theme.h"
 
 volatile sig_atomic_t Main::running = true;
 
 Main::Main()
     : Audio(),
-      Theme(Audio),
       Input(Audio) {
     signal(SIGINT, Main::signalHandler);
 }
@@ -15,8 +17,18 @@ Main::Main()
 void Main::run() {
     std::cout << "Kream engine starting..." << std::endl;
 
-    Theme.loadThemes("assets/themes");
-    Input.start();
+    // Load theme sounds - continue even if some sounds fail to load
+    if (!Theme::loadThemes(Audio, "assets/themes")) {
+        std::cerr << "Warning: Theme loading had issues, continuing with available sounds" << std::endl;
+    }
+
+    // Start input capture - this may throw if permissions are not granted
+    try {
+        Input.start();
+    } catch (const std::runtime_error& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return;
+    }
 
     std::cout << "Kream engine started. Press keys... (Ctrl+C to quit)" << std::endl;
 
@@ -34,6 +46,12 @@ void Main::signalHandler(int signum) {
 }
 
 int main() {
-    Main main;
-    main.run();
+    try {
+        Main main;
+        main.run();
+        return EXIT_SUCCESS;
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
 }
