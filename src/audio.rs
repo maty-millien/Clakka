@@ -6,6 +6,10 @@ use std::sync::atomic::{fence, AtomicPtr, Ordering};
 pub const MAX_VOICES: usize = 16;
 const BUFFER_FRAMES: u32 = 128;
 const MAX_FRAMES_PER_SLICE: u32 = 4096;
+const DEFAULT_SAMPLE_RATE: f64 = 48_000.0;
+const SINC_ZEROS: usize = 32;
+const MAX_SINC_PHASES: usize = 4096;
+const KAISER_BETA: f64 = 9.0;
 const QUEUE_CAPACITY: usize = 64;
 const KEY_TABLE: usize = 128;
 
@@ -136,7 +140,10 @@ impl Audio {
     }
 
     pub fn load_key_sound(&mut self, key_code: i32, ty: SoundType, path: &str) -> bool {
-        let Some((sound, rate)) = load_wav(path) else {
+        if !self.initialized && !self.init_audio_unit() {
+            return false;
+        }
+        let Some(sound) = self.load_sound(path) else {
             eprintln!("Error: Unable to load key sound {path}");
             return false;
         };
@@ -149,17 +156,25 @@ impl Audio {
                 None => self.explicit_other[t].push((key_code, p)),
             },
         }
-        self.initialized || self.init_audio_unit(rate)
+        true
     }
 
     pub fn load_fallback_sound(&mut self, ty: SoundType, path: &str) -> bool {
-        let Some((sound, rate)) = load_wav(path) else {
+        if !self.initialized && !self.init_audio_unit() {
+            return false;
+        }
+        let Some(sound) = self.load_sound(path) else {
             eprintln!("Error: Unable to load fallback sound {path}");
             return false;
         };
         let p = self.keep(sound);
         self.fallback[ty as usize].push(p);
-        self.initialized || self.init_audio_unit(rate)
+        true
+    }
+
+    fn load_sound(&self, path: &str) -> Option<Sound> {
+        let (sound, rate) = load_wav(path)?;
+        Some(if rate.round() == self.sample_rate.round() { sound } else { resample(&sound, rate, self.sample_rate) })
     }
 
     fn keep(&mut self, sound: Sound) -> *const Sound {
@@ -225,8 +240,7 @@ impl Audio {
         }
     }
 
-    fn init_audio_unit(&mut self, file_sample_rate: f64) -> bool {
-        self.sample_rate = file_sample_rate;
+    fn init_audio_unit(&mut self) -> bool {
         unsafe {
             let desc = AudioComponentDescription {
                 component_type: fourcc(b"auou"),
@@ -258,6 +272,10 @@ impl Audio {
             };
 
             self.set_property(AU_CURRENT_DEVICE, SCOPE_GLOBAL, 0, &device_id);
+            self.sample_rate = object_property::<f64>(device_id, b"nsrt", SCOPE_GLOBAL_OBJECT)
+                .ok()
+                .filter(|r| *r > 0.0)
+                .unwrap_or(DEFAULT_SAMPLE_RATE);
 
             set_object_property(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT, &BUFFER_FRAMES);
             let buffer_frames = object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT).unwrap_or(BUFFER_FRAMES);
@@ -267,7 +285,7 @@ impl Audio {
             self.set_property(AU_ENABLE_IO, SCOPE_OUTPUT, 0, &1u32);
 
             let format = AudioStreamBasicDescription {
-                sample_rate: file_sample_rate,
+                sample_rate: self.sample_rate,
                 format_id: fourcc(b"lpcm"),
                 format_flags: 9 | 32,
                 bytes_per_packet: 4,
@@ -500,6 +518,78 @@ fn planar<const B: usize>(data: &[u8], channels: usize, convert: impl Fn([u8; B]
     out
 }
 
+fn resample(sound: &Sound, from: f64, to: f64) -> Sound {
+    let (from, to) = (from.round() as usize, to.round() as usize);
+    let g = gcd(from, to);
+    let (step, phases) = (from / g, to / g);
+    let table_phases = phases.min(MAX_SINC_PHASES);
+    let cutoff = 0.95 * (to as f64 / from as f64).min(1.0);
+    let half = (SINC_ZEROS as f64 / cutoff).ceil() as usize;
+    let taps = 2 * half;
+    let table: Vec<f32> = (0..table_phases)
+        .flat_map(|p| {
+            let frac = p as f64 / table_phases as f64;
+            (0..taps).map(move |i| sinc_kernel(frac + half as f64 - 1.0 - i as f64, cutoff))
+        })
+        .collect();
+
+    let frames = (sound.frames * to).div_ceil(from).max(1);
+    let stereo = sound.right_offset != 0;
+    let mut out = vec![0.0f32; if stereo { frames * 2 } else { frames }].into_boxed_slice();
+    let pad = |ch: &[f32]| [&vec![0.0; half][..], ch, &vec![0.0; half + 1][..]].concat();
+    let left = pad(&sound.data[..sound.frames]);
+    let right = pad(&sound.data[sound.right_offset..][..sound.frames]);
+    for j in 0..frames {
+        let r = j * step % phases;
+        let q = if table_phases == phases { r } else { (r * table_phases + phases / 2) / phases };
+        let (base, p) = (j * step / phases + q / table_phases, q % table_phases);
+        let w = &table[p * taps..][..taps];
+        out[j] = dot(&left[base + 1..][..taps], w);
+        if stereo {
+            out[frames + j] = dot(&right[base + 1..][..taps], w);
+        }
+    }
+    Sound { data: out, frames, right_offset: if stereo { frames } else { 0 } }
+}
+
+#[inline(always)]
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let ((ac, ar), (bc, br)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    let tail: f32 = ar.iter().zip(br).map(|(x, y)| x * y).sum();
+    for (x, y) in ac.iter().zip(bc) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    acc.iter().sum::<f32>() + tail
+}
+
+fn sinc_kernel(distance: f64, cutoff: f64) -> f32 {
+    let x = distance.abs() * cutoff;
+    if x >= SINC_ZEROS as f64 {
+        return 0.0;
+    }
+    let u = x / SINC_ZEROS as f64;
+    let px = std::f64::consts::PI * x;
+    let sinc = if x < 1e-9 { 1.0 } else { px.sin() / px };
+    (cutoff * sinc * bessel_i0(KAISER_BETA * (1.0 - u * u).sqrt()) / bessel_i0(KAISER_BETA)) as f32
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+fn bessel_i0(x: f64) -> f64 {
+    let (mut sum, mut term, mut k) = (1.0, 1.0, 1.0);
+    while term > sum * 1e-12 {
+        term *= (x / (2.0 * k)) * (x / (2.0 * k));
+        sum += term;
+        k += 1.0;
+    }
+    sum
+}
+
 unsafe fn object_property<T>(object: u32, selector: &[u8; 4], scope: u32) -> Result<T, i32> {
     let addr = AudioObjectPropertyAddress { selector: fourcc(selector), scope, element: 0 };
     let mut value = std::mem::MaybeUninit::<T>::zeroed();
@@ -694,6 +784,37 @@ mod tests {
         let data: Vec<u8> = [0.25f32, -0.75].iter().flat_map(|x| x.to_le_bytes()).collect();
         let (s, _) = decode_wav(&wav(3, 1, 4, 32, None, &data)).unwrap();
         assert_eq!(samples(&s).0, vec![0.25, -0.75]);
+    }
+
+    fn tone(freq: f64, rate: f64, frames: usize) -> Sound {
+        let ch: Vec<f32> = (0..frames).map(|i| (std::f64::consts::TAU * freq * i as f64 / rate).sin() as f32).collect();
+        Sound { data: [ch.clone(), ch].concat().into_boxed_slice(), frames, right_offset: frames }
+    }
+
+    fn tone_error(from: f64, to: f64) -> f64 {
+        let out = resample(&tone(1000.0, from, from as usize), from, to);
+        assert_eq!(out.frames, to as usize);
+        let (l, r) = samples(&out);
+        assert_eq!(l, r);
+        (1000..out.frames - 1000)
+            .map(|i| (l[i] as f64 - (std::f64::consts::TAU * 1000.0 * i as f64 / to).sin()).abs())
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn resamples_tone_without_distortion() {
+        let err = tone_error(44_100.0, 48_000.0);
+        assert!(err < 1e-4, "max error {err}");
+        let err = tone_error(44_100.0, 47_999.0);
+        assert!(err < 1e-4, "max error {err}");
+    }
+
+    #[test]
+    fn downsampling_removes_content_above_nyquist() {
+        let out = resample(&tone(30_000.0, 96_000.0, 96_000), 96_000.0, 48_000.0);
+        assert_eq!(out.frames, 48_000);
+        let peak = samples(&out).0[1000..47_000].iter().fold(0.0f32, |a, x| a.max(x.abs()));
+        assert!(peak < 1e-4, "alias peak {peak}");
     }
 
     #[test]
