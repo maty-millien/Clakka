@@ -5,6 +5,7 @@ use std::sync::atomic::{fence, AtomicPtr, Ordering};
 
 pub const MAX_VOICES: usize = 16;
 const BUFFER_FRAMES: u32 = 128;
+const MAX_FRAMES_PER_SLICE: u32 = 4096;
 const QUEUE_CAPACITY: usize = 64;
 const KEY_TABLE: usize = 128;
 
@@ -246,41 +247,21 @@ impl Audio {
                 return false;
             }
 
-            let mut device_id: u32 = 0;
-            let mut size = size_of::<u32>() as u32;
-            let mut addr = AudioObjectPropertyAddress {
-                selector: fourcc(b"dOut"),
-                scope: SCOPE_GLOBAL_OBJECT,
-                element: 0,
+            let device_id = match object_property::<u32>(AUDIO_SYSTEM_OBJECT, b"dOut", SCOPE_GLOBAL_OBJECT) {
+                Ok(id) => id,
+                Err(status) => {
+                    eprintln!("Error: Failed to get default audio output device (OSStatus {status})");
+                    AudioComponentInstanceDispose(self.audio_unit);
+                    self.audio_unit = ptr::null_mut();
+                    return false;
+                }
             };
-            let status = AudioObjectGetPropertyData(
-                AUDIO_SYSTEM_OBJECT,
-                &addr,
-                0,
-                ptr::null(),
-                &mut size,
-                (&raw mut device_id).cast(),
-            );
-            if status != 0 {
-                eprintln!("Error: Failed to get default audio output device (OSStatus {status})");
-                AudioComponentInstanceDispose(self.audio_unit);
-                self.audio_unit = ptr::null_mut();
-                return false;
-            }
 
             self.set_property(AU_CURRENT_DEVICE, SCOPE_GLOBAL, 0, &device_id);
 
-            addr.selector = fourcc(b"fsiz");
-            addr.scope = SCOPE_GLOBAL_OBJECT;
-            AudioObjectSetPropertyData(
-                device_id,
-                &addr,
-                0,
-                ptr::null(),
-                size_of::<u32>() as u32,
-                (&BUFFER_FRAMES as *const u32).cast(),
-            );
-            self.set_property(AU_MAX_FRAMES_PER_SLICE, SCOPE_GLOBAL, 0, &BUFFER_FRAMES);
+            set_object_property(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT, &BUFFER_FRAMES);
+            let buffer_frames = object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT).unwrap_or(BUFFER_FRAMES);
+            self.set_property(AU_MAX_FRAMES_PER_SLICE, SCOPE_GLOBAL, 0, &buffer_frames.max(MAX_FRAMES_PER_SLICE));
 
             self.set_property(AU_ENABLE_IO, SCOPE_INPUT, 1, &0u32);
             self.set_property(AU_ENABLE_IO, SCOPE_OUTPUT, 0, &1u32);
@@ -376,7 +357,9 @@ unsafe extern "C" fn render_callback(
         return 0;
     }
     let bufs = (&raw mut (*io).buffers).cast::<AudioBuffer>();
-    let n = frames as usize;
+    let n = (frames as usize)
+        .min((*bufs).data_byte_size as usize / 4)
+        .min((*bufs.add(1)).data_byte_size as usize / 4);
     let out_l = std::slice::from_raw_parts_mut((*bufs).data.cast::<f32>(), n);
     let out_r = std::slice::from_raw_parts_mut((*bufs.add(1)).data.cast::<f32>(), n);
     mix(&mut st.voices, out_l, out_r);
@@ -515,6 +498,22 @@ fn planar<const B: usize>(data: &[u8], channels: usize, convert: impl Fn([u8; B]
         }
     }
     out
+}
+
+unsafe fn object_property<T>(object: u32, selector: &[u8; 4], scope: u32) -> Result<T, i32> {
+    let addr = AudioObjectPropertyAddress { selector: fourcc(selector), scope, element: 0 };
+    let mut value = std::mem::MaybeUninit::<T>::zeroed();
+    let mut size = size_of::<T>() as u32;
+    match AudioObjectGetPropertyData(object, &addr, 0, ptr::null(), &mut size, value.as_mut_ptr().cast()) {
+        0 if size as usize == size_of::<T>() => Ok(value.assume_init()),
+        0 => Err(-1),
+        status => Err(status),
+    }
+}
+
+unsafe fn set_object_property<T>(object: u32, selector: &[u8; 4], scope: u32, value: &T) -> i32 {
+    let addr = AudioObjectPropertyAddress { selector: fourcc(selector), scope, element: 0 };
+    AudioObjectSetPropertyData(object, &addr, 0, ptr::null(), size_of::<T>() as u32, (value as *const T).cast())
 }
 
 type AudioUnit = *mut c_void;
