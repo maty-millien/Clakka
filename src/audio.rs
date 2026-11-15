@@ -383,9 +383,9 @@ impl Audio {
                 .unwrap_or(DEFAULT_SAMPLE_RATE);
             self.prepare_synth(themes, self.sample_rate);
 
-            let [min, max] = object_property::<[f64; 2]>(device_id, b"fsz#", SCOPE_GLOBAL_OBJECT)
+            let [min, _] = object_property::<[f64; 2]>(device_id, b"fsz#", SCOPE_GLOBAL_OBJECT)
                 .unwrap_or([BUFFER_FRAMES as f64; 2]);
-            let requested = (BUFFER_FRAMES as f64).clamp(min, max.max(min)) as u32;
+            let requested = min.max(1.0) as u32;
             set_object_property(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT, &requested);
             self.buffer_frames = object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT)
                 .unwrap_or(requested);

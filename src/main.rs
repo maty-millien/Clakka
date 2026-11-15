@@ -70,6 +70,7 @@ fn run(audio: &mut Audio, args: &cli::Args) {
         eprintln!("Error: Failed to start audio output");
         return;
     }
+    unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
     let mut input = Input::new(audio);
     if let Err(e) = input.start() {
         eprintln!("Error: {e}");
@@ -130,8 +131,10 @@ fn main() {
 }
 
 const SIGINT: c_int = 2;
+const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
 
 extern "C" {
+    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: c_int) -> c_int;
     fn signal(sig: c_int, handler: extern "C" fn(c_int)) -> *const c_void;
 }
 
