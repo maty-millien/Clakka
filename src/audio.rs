@@ -4,7 +4,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::{fence, AtomicPtr, Ordering};
 
 pub const MAX_VOICES: usize = 16;
-const BUFFER_FRAMES: u32 = 128;
+const BUFFER_FRAMES: u32 = 32;
 const MAX_FRAMES_PER_SLICE: u32 = 4096;
 const DEFAULT_SAMPLE_RATE: f64 = 48_000.0;
 const SINC_ZEROS: usize = 32;
@@ -104,6 +104,8 @@ pub struct Audio {
     fallback: [Vec<*const Sound>; 2],
     next_fallback: [Cell<usize>; 2],
     sample_rate: f64,
+    buffer_frames: u32,
+    device_frames: u32,
     initialized: bool,
     latency_log: bool,
     timebase: MachTimebaseInfo,
@@ -133,6 +135,8 @@ impl Audio {
             fallback: [Vec::new(), Vec::new()],
             next_fallback: [Cell::new(0), Cell::new(0)],
             sample_rate: 0.0,
+            buffer_frames: 0,
+            device_frames: 0,
             initialized: false,
             latency_log: std::env::var_os("KREAM_LATENCY_LOG").is_some_and(|v| v == "1"),
             timebase,
@@ -221,17 +225,23 @@ impl Audio {
         let latency_us = now.wrapping_sub(event_time) as f64 * self.timebase.numer as f64
             / self.timebase.denom as f64
             / 1000.0;
-        let buffer_ms = (128.0 / self.sample_rate) * 1000.0;
-        let mut buf = [0u8; 160];
+        let buffer_ms = self.buffer_frames as f64 * 1000.0 / self.sample_rate;
+        let device_ms = self.device_frames as f64 * 1000.0 / self.sample_rate;
+        let mut buf = [0u8; 200];
         let n = unsafe {
             snprintf(
                 buf.as_mut_ptr().cast(),
                 buf.len(),
-                c"[Latency] key=%d type=%s software=%g\xc2\xb5s +buffer\xe2\x89\x88%gms\n".as_ptr(),
+                c"[Latency] key=%d type=%s software=%g\xc2\xb5s +buffer\xe2\x89\x88%g-%gms +device\xe2\x89\x88%gms (%u frames @ %g Hz)\n"
+                    .as_ptr(),
                 key_code as c_int,
                 ty.name().as_ptr().cast::<c_char>(),
                 latency_us,
                 buffer_ms,
+                2.0 * buffer_ms,
+                device_ms,
+                self.buffer_frames,
+                self.sample_rate,
             )
         };
         if n > 0 {
@@ -277,9 +287,18 @@ impl Audio {
                 .filter(|r| *r > 0.0)
                 .unwrap_or(DEFAULT_SAMPLE_RATE);
 
-            set_object_property(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT, &BUFFER_FRAMES);
-            let buffer_frames = object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT).unwrap_or(BUFFER_FRAMES);
-            self.set_property(AU_MAX_FRAMES_PER_SLICE, SCOPE_GLOBAL, 0, &buffer_frames.max(MAX_FRAMES_PER_SLICE));
+            let [min, max] = object_property::<[f64; 2]>(device_id, b"fsz#", SCOPE_GLOBAL_OBJECT)
+                .unwrap_or([BUFFER_FRAMES as f64; 2]);
+            let requested = (BUFFER_FRAMES as f64).clamp(min, max.max(min)) as u32;
+            set_object_property(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT, &requested);
+            self.buffer_frames = object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT).unwrap_or(requested);
+            self.set_property(AU_MAX_FRAMES_PER_SLICE, SCOPE_GLOBAL, 0, &self.buffer_frames.max(MAX_FRAMES_PER_SLICE));
+            let stream_latency = object_property::<u32>(device_id, b"stm#", SCOPE_OUTPUT_OBJECT)
+                .and_then(|stream| object_property::<u32>(stream, b"ltnc", SCOPE_GLOBAL_OBJECT))
+                .unwrap_or(0);
+            self.device_frames = object_property::<u32>(device_id, b"ltnc", SCOPE_OUTPUT_OBJECT).unwrap_or(0)
+                + object_property::<u32>(device_id, b"saft", SCOPE_OUTPUT_OBJECT).unwrap_or(0)
+                + stream_latency;
 
             self.set_property(AU_ENABLE_IO, SCOPE_INPUT, 1, &0u32);
             self.set_property(AU_ENABLE_IO, SCOPE_OUTPUT, 0, &1u32);
@@ -319,7 +338,13 @@ impl Audio {
                 self.audio_unit = ptr::null_mut();
                 return false;
             }
+            self.buffer_frames =
+                object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT).unwrap_or(self.buffer_frames);
         }
+        println!(
+            "Audio output: {} Hz, {}-frame buffer, {} frames of device latency",
+            self.sample_rate, self.buffer_frames, self.device_frames
+        );
         self.initialized = true;
         true
     }
@@ -615,6 +640,7 @@ const fn fourcc(c: &[u8; 4]) -> u32 {
 
 const AUDIO_SYSTEM_OBJECT: u32 = 1;
 const SCOPE_GLOBAL_OBJECT: u32 = fourcc(b"glob");
+const SCOPE_OUTPUT_OBJECT: u32 = fourcc(b"outp");
 const SCOPE_GLOBAL: u32 = 0;
 const SCOPE_INPUT: u32 = 1;
 const SCOPE_OUTPUT: u32 = 2;
