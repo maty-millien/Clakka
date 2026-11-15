@@ -132,9 +132,9 @@ impl Profile {
         },
         low: Low {
             modes: Group {
-                freqs: [110.0, 205.0, 136.0, 240.0],
-                t60_ms: [40.0, 35.0, 130.0, 110.0],
-                gains_db: [-18.8, -12.7, -31.6, -18.3],
+                freqs: [110.0, 190.0, 140.0, 260.0],
+                t60_ms: [70.0, 55.0, 90.0, 60.0],
+                gains_db: [-14.0, -12.0, -20.0, -17.0],
                 detune: 0.02,
             },
             large_freq: 105.0,
@@ -143,26 +143,26 @@ impl Profile {
         plate: Plate {
             modes: Group {
                 freqs: [1383.0, 1431.0, 1539.0, 1749.0, 1841.0, 1991.0, 2045.0, 2088.0, 2147.0, 2217.0, 2390.0, 2551.0],
-                t60_ms: [10.0, 125.0, 10.0, 125.0, 10.0, 125.0, 10.0, 125.0, 10.0, 125.0, 10.0, 125.0],
+                t60_ms: [16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0],
                 gains_db: [-8.6, -10.2, 0.0, -10.2, -3.4, -23.1, -3.4, -23.1, -3.4, -23.1, -7.2, -10.5],
                 detune: 0.01,
             },
             floor: 0.35,
         },
         keycap: Group {
-            freqs: [880.0, 1000.0, 1150.0, 1300.0],
-            t60_ms: [100.0, 95.0, 90.0, 85.0],
-            gains_db: [-26.8, -28.7, -38.5, -39.2],
+            freqs: [900.0, 1050.0, 1200.0, 1350.0],
+            t60_ms: [28.0, 26.0, 24.0, 22.0],
+            gains_db: [-26.0, -28.0, -31.0, -34.0],
             detune: 0.06,
         },
         switch: Group {
             freqs: [2700.0, 3300.0, 4300.0, 5400.0],
-            t60_ms: [70.0, 72.0, 76.0, 80.0],
-            gains_db: [-7.2, -26.3, -24.0, -36.8],
+            t60_ms: [10.0, 9.0, 8.0, 7.0],
+            gains_db: [-10.0, -18.0, -22.0, -32.0],
             detune: 0.03,
         },
-        noise: Noise { hp_hz: 2000.0, lp_hz: 9000.0, attack_ms: 0.3, t60_ms: 85.0, level_db: -26.1 },
-        hit: Hit { width_ms: [0.28, 0.5], sec_gap_ms: [6.0, 13.0], sec_level_db: [-20.0, -14.0] },
+        noise: Noise { hp_hz: 900.0, lp_hz: 5000.0, attack_ms: 0.3, t60_ms: 22.0, level_db: -20.0 },
+        hit: Hit { width_ms: [0.4, 0.7], sec_gap_ms: [6.0, 13.0], sec_level_db: [-20.0, -14.0] },
         variation: Variation {
             pitch: 0.003,
             pitch_clip: 0.008,
@@ -192,8 +192,8 @@ impl Profile {
         },
         release: Release {
             hardness: 1.0,
-            decay: 0.6,
-            low_db: -4.6,
+            decay: 1.0,
+            low_db: -12.0,
             plate_db: 6.9,
             keycap_db: 14.1,
             switch_db: -18.8,
@@ -204,14 +204,14 @@ impl Profile {
             sec_level_db: -16.0,
         },
         keys: [
-            KeyVoice { code: 51, gains_db: [-10.7, 3.7, 8.8, -3.6, 1.8], decay: 1.09, level_db: 1.3 },
-            KeyVoice { code: 36, gains_db: [-5.7, -6.3, 7.8, 2.5, 1.7], decay: 0.81, level_db: 1.3 },
+            KeyVoice { code: 51, gains_db: [-15.7, 3.7, 1.8, -3.6, 1.8], decay: 1.09, level_db: 1.3 },
+            KeyVoice { code: 36, gains_db: [-10.7, -6.3, 0.8, 2.5, 1.7], decay: 0.81, level_db: 1.3 },
             KeyVoice { code: 48, gains_db: [2.6, 1.2, -13.6, 11.2, -1.4], decay: 1.14, level_db: 1.3 },
-            KeyVoice { code: 49, gains_db: [-7.5, 6.0, 8.6, -1.1, -6.0], decay: 1.12, level_db: 1.3 },
-            KeyVoice { code: 56, gains_db: [-7.8, -9.0, 8.2, 8.5, 0.1], decay: 1.11, level_db: 1.3 },
+            KeyVoice { code: 49, gains_db: [-12.5, 6.0, 1.6, -1.1, -6.0], decay: 1.12, level_db: 1.3 },
+            KeyVoice { code: 56, gains_db: [-12.8, -9.0, 1.2, 8.5, 0.1], decay: 1.11, level_db: 1.3 },
             KeyVoice { code: 59, gains_db: [-0.9, 7.8, 5.2, -17.1, 5.0], decay: 0.96, level_db: 1.3 },
             KeyVoice { code: 57, gains_db: [7.9, -5.0, 7.9, -17.1, 6.3], decay: 1.18, level_db: 1.3 },
-            KeyVoice { code: 60, gains_db: [-7.8, -9.0, 8.2, 8.5, 0.1], decay: 1.11, level_db: 1.3 },
+            KeyVoice { code: 60, gains_db: [-12.8, -9.0, 1.2, 8.5, 0.1], decay: 1.11, level_db: 1.3 },
         ],
     };
 }
