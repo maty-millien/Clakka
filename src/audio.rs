@@ -42,8 +42,6 @@ const IDLE: Voice = Voice { left: ptr::null(), right: ptr::null(), frames: 0, po
 struct RenderState {
     voices: [Voice; MAX_VOICES],
     next_voice: usize,
-    rt_scheduled: bool,
-    sample_rate: f64,
 }
 
 #[repr(align(128))]
@@ -116,8 +114,6 @@ impl Audio {
             render: UnsafeCell::new(RenderState {
                 voices: [IDLE; MAX_VOICES],
                 next_voice: 0,
-                rt_scheduled: false,
-                sample_rate: 0.0,
             }),
         });
         let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
@@ -228,7 +224,6 @@ impl Audio {
 
     fn init_audio_unit(&mut self, file_sample_rate: f64) -> bool {
         self.sample_rate = file_sample_rate;
-        unsafe { (*self.engine.as_ref().render.get()).sample_rate = file_sample_rate };
         unsafe {
             let desc = AudioComponentDescription {
                 component_type: fourcc(b"auou"),
@@ -353,16 +348,6 @@ impl Drop for Audio {
     }
 }
 
-fn setup_realtime_thread(buffer_frames: u32, sample_rate: f64) {
-    let period = ((buffer_frames as f64 / sample_rate) * 1e9) as u32;
-    let computation = period / 2;
-    let policy = [period, computation, period, 0];
-    unsafe {
-        let thread = pthread_mach_thread_np(pthread_self());
-        thread_policy_set(thread, THREAD_TIME_CONSTRAINT_POLICY, policy.as_ptr(), 4);
-    }
-}
-
 unsafe extern "C" fn render_callback(
     ref_con: *mut c_void,
     _flags: *mut u32,
@@ -373,11 +358,6 @@ unsafe extern "C" fn render_callback(
 ) -> i32 {
     let engine = &*(ref_con as *const Engine);
     let st = &mut *engine.render.get();
-
-    if !st.rt_scheduled {
-        setup_realtime_thread(frames, st.sample_rate);
-        st.rt_scheduled = true;
-    }
 
     engine.queue.drain(|s| {
         let base = s.data.as_ptr();
@@ -539,7 +519,6 @@ const AU_MAX_FRAMES_PER_SLICE: u32 = 14;
 const AU_SET_RENDER_CALLBACK: u32 = 23;
 const AU_CURRENT_DEVICE: u32 = 2000;
 const AU_ENABLE_IO: u32 = 2003;
-const THREAD_TIME_CONSTRAINT_POLICY: u32 = 2;
 
 #[repr(C)]
 struct AudioComponentDescription {
@@ -633,9 +612,6 @@ extern "C" {
 extern "C" {
     fn mach_absolute_time() -> u64;
     fn mach_timebase_info(info: *mut MachTimebaseInfo) -> c_int;
-    fn pthread_self() -> usize;
-    fn pthread_mach_thread_np(thread: usize) -> u32;
-    fn thread_policy_set(thread: u32, flavor: u32, info: *const u32, count: u32) -> c_int;
     fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
     fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
 }
