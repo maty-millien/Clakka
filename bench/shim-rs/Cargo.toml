@@ -1,0 +1,20 @@
+# Bench-only static library exposing the Rust engine through bench/shim.h.
+# It compiles the shipped modules from ../../src directly (#[path]), with the same
+# release profile as the main crate.
+[package]
+name = "kream_bench_shim"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[workspace]
