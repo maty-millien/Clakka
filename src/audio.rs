@@ -12,6 +12,8 @@ const MAX_FRAMES_PER_SLICE: u32 = 4096;
 const DEFAULT_SAMPLE_RATE: f64 = 48_000.0;
 const QUEUE_CAPACITY: usize = 64;
 const SYNTH_BIT: u64 = 1 << 63;
+const LIMIT: f32 = 0.9;
+const LIMIT_RELEASE_S: f64 = 0.06;
 
 #[inline(always)]
 fn synth_word(key_code: i32, ty: SoundType, velocity: u8, seed: u32) -> u64 {
@@ -41,6 +43,8 @@ struct RenderState {
     synth_voices: [SynthVoice; VOICES],
     next_synth: usize,
     fp_ready: bool,
+    gain: f32,
+    release: f32,
 }
 
 #[repr(align(128))]
@@ -150,6 +154,8 @@ impl Audio {
                 synth_voices: [SynthVoice::IDLE; VOICES],
                 next_synth: 0,
                 fp_ready: false,
+                gain: 1.0,
+                release: 0.0,
             }),
             banks: Vec::new(),
             current: AtomicUsize::new(0),
@@ -193,7 +199,12 @@ impl Audio {
             })
             .collect();
         self.sample_rate = rate;
-        unsafe { (*self.engine.as_ptr()).banks = banks };
+        unsafe {
+            let engine = &mut *self.engine.as_ptr();
+            engine.banks = banks;
+            engine.render.get_mut().release =
+                (1.0 - (-1.0 / (LIMIT_RELEASE_S * rate)).exp()) as f32;
+        }
         fence(Ordering::Release);
         self.set_theme(0);
     }
@@ -541,16 +552,25 @@ fn mix(st: &mut RenderState, out_l: &mut [f32], out_r: &mut [f32]) {
         }
     }
     if active {
-        clip(out_l);
-        clip(out_r);
+        limit(st, out_l, out_r);
+    } else {
+        st.gain = 1.0;
     }
 }
 
 #[inline(always)]
-fn clip(out: &mut [f32]) {
-    for x in out {
-        *x = x.clamp(-1.0, 1.0);
+fn limit(st: &mut RenderState, out_l: &mut [f32], out_r: &mut [f32]) {
+    let (release, mut g) = (st.release, st.gain);
+    for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
+        g += release * (1.0 - g);
+        let peak = l.abs().max(r.abs());
+        if peak * g > LIMIT {
+            g = LIMIT / peak;
+        }
+        *l *= g;
+        *r *= g;
     }
+    st.gain = g;
 }
 
 unsafe fn object_property<T>(object: u32, selector: &[u8; 4], scope: u32) -> Result<T, i32> {
