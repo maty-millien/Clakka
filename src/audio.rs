@@ -552,35 +552,43 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
         return None;
     }
     let bps = bits / 8;
-    let convert: fn(&[u8]) -> f32 = match (tag, bps) {
-        (1, 1) => |s| s[0] as f32 * (2.0 / 255.0) - 1.0, // 0..255 -> 0..2 -> -1..1
-        (1, 2) => |s| i16::from_le_bytes([s[0], s[1]]) as f32 * (1.0 / 32768.0),
-        (1, 3) => |s| {
-            let x = (u32::from(s[0]) << 8 | u32::from(s[1]) << 16 | u32::from(s[2]) << 24) as i32 >> 8;
-            (x as f64 * 0.000_000_119_209_289_550_781_25) as f32
-        },
-        (1, 4) => |s| (i32::from_le_bytes([s[0], s[1], s[2], s[3]]) as f64 / 2_147_483_648.0) as f32,
-        (3, 4) => |s| f32::from_le_bytes([s[0], s[1], s[2], s[3]]),
-        (3, 8) => |s| f64::from_le_bytes(s.try_into().unwrap()) as f32,
-        _ => return None,
-    };
-
     let frame_bytes = bps * channels;
     let frames = data.len() / frame_bytes;
     if frames == 0 {
         return None;
     }
+    let data = &data[..frames * frame_bytes];
+    let out = match (tag, bps) {
+        (1, 1) => planar::<1>(data, channels, |s| s[0] as f32 * (2.0 / 255.0) - 1.0), // 0..255 -> -1..1
+        (1, 2) => planar::<2>(data, channels, |s| i16::from_le_bytes(s) as f32 * (1.0 / 32768.0)),
+        (1, 3) => planar::<3>(data, channels, |s| {
+            let x = (u32::from(s[0]) << 8 | u32::from(s[1]) << 16 | u32::from(s[2]) << 24) as i32 >> 8;
+            (x as f64 * 0.000_000_119_209_289_550_781_25) as f32
+        }),
+        (1, 4) => planar::<4>(data, channels, |s| (i32::from_le_bytes(s) as f64 / 2_147_483_648.0) as f32),
+        (3, 4) => planar::<4>(data, channels, f32::from_le_bytes),
+        (3, 8) => planar::<8>(data, channels, |s| f64::from_le_bytes(s) as f32),
+        _ => return None,
+    };
+    let right_offset = if channels >= 2 { frames } else { 0 };
+    Some((Sound { data: out, frames, right_offset }, rate as f64))
+}
+
+/// Interleaved samples of `B` bytes -> planar [left..., right...] (left only for mono).
+/// Generic over the converter so it inlines into the loop.
+fn planar<const B: usize>(data: &[u8], channels: usize, convert: impl Fn([u8; B]) -> f32) -> Box<[f32]> {
+    let frames = data.len() / (B * channels);
     let stereo = channels >= 2;
     let mut out = vec![0.0f32; if stereo { frames * 2 } else { frames }].into_boxed_slice();
     let (left, right) = out.split_at_mut(frames);
-    for (f, frame) in data.chunks_exact(frame_bytes).enumerate() {
-        left[f] = convert(&frame[..bps]);
+    let sample = |frame: &[u8], c: usize| convert(frame[c * B..(c + 1) * B].try_into().unwrap());
+    for (f, frame) in data.chunks_exact(B * channels).enumerate() {
+        left[f] = sample(frame, 0);
         if stereo {
-            right[f] = convert(&frame[bps..2 * bps]);
+            right[f] = sample(frame, 1);
         }
     }
-    let sound = Sound { data: out, frames, right_offset: if stereo { frames } else { 0 } };
-    Some((sound, rate as f64))
+    out
 }
 
 // --- FFI ----------------------------------------------------------------------
