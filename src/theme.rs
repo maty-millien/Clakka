@@ -2,7 +2,7 @@ use std::os::unix::ffi::OsStrExt;
 
 use crate::audio::{Audio, SoundType};
 
-const KEY_CODES: [(&[u8], i32); 7] = [
+pub(crate) const KEY_CODES: [(&[u8], i32); 7] = [
     (b"back", 51),
     (b"enter", 36),
     (b"tab", 48),
