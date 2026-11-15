@@ -14,6 +14,7 @@ const MODIFIER_MASKS: [u64; 5] = [
 const FLAG_ALPHA_SHIFT: u64 = 0x0001_0000;
 
 const CAPS_RELEASE_DELAY_S: f64 = 0.1;
+const TIMER_IDLE_S: f64 = 1e9;
 
 const EVENT_KEY_DOWN: u32 = 10;
 const EVENT_KEY_UP: u32 = 11;
@@ -27,6 +28,8 @@ struct TapState<'a> {
     audio: &'a Audio,
     last_flags: Cell<Option<u64>>,
     caps_key_code: Cell<i32>,
+    caps_pending: Cell<bool>,
+    caps_timer: Cell<CFRunLoopTimerRef>,
     tap: Cell<CFMachPortRef>,
 }
 
@@ -51,6 +54,8 @@ impl<'a> Input<'a> {
                 audio,
                 last_flags: Cell::new(None),
                 caps_key_code: Cell::new(0),
+                caps_pending: Cell::new(false),
+                caps_timer: Cell::new(ptr::null_mut()),
                 tap: Cell::new(ptr::null_mut()),
             }),
             run_loop_source: ptr::null_mut(),
@@ -72,6 +77,26 @@ impl<'a> Input<'a> {
                 return Err(TapError);
             }
             self.state.tap.set(tap);
+            let mut ctx = CFRunLoopTimerContext {
+                version: 0,
+                info: self.state_ptr(),
+                retain: ptr::null(),
+                release: ptr::null(),
+                copy_description: ptr::null(),
+            };
+            let timer = CFRunLoopTimerCreate(
+                ptr::null(),
+                CFAbsoluteTimeGetCurrent() + TIMER_IDLE_S,
+                TIMER_IDLE_S,
+                0,
+                0,
+                caps_release,
+                &mut ctx,
+            );
+            if !timer.is_null() {
+                CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes);
+            }
+            self.state.caps_timer.set(timer);
             self.run_loop_source = CFMachPortCreateRunLoopSource(ptr::null(), tap, 0);
             CFRunLoopAddSource(CFRunLoopGetCurrent(), self.run_loop_source, kCFRunLoopCommonModes);
             CGEventTapEnable(tap, true);
@@ -89,7 +114,13 @@ impl<'a> Input<'a> {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), self.run_loop_source, kCFRunLoopCommonModes);
             CFRelease(self.run_loop_source);
             CFRelease(tap);
+            let timer = self.state.caps_timer.replace(ptr::null_mut());
+            if !timer.is_null() {
+                CFRunLoopTimerInvalidate(timer);
+                CFRelease(timer);
+            }
         }
+        self.state.caps_pending.set(false);
         self.run_loop_source = ptr::null_mut();
     }
 
@@ -128,9 +159,15 @@ unsafe extern "C" fn keyboard_callback(
             }
 
             if changed & FLAG_ALPHA_SHIFT != 0 {
+                let timer = state.caps_timer.get();
+                if !timer.is_null() {
+                    if state.caps_pending.replace(true) {
+                        state.audio.play(state.caps_key_code.get(), SoundType::Release, event_time);
+                    }
+                    CFRunLoopTimerSetNextFireDate(timer, CFAbsoluteTimeGetCurrent() + CAPS_RELEASE_DELAY_S);
+                }
                 state.audio.play(key_code, SoundType::Press, event_time);
                 state.caps_key_code.set(key_code);
-                schedule_caps_release(user_info);
             }
 
             state.last_flags.set(Some(flags));
@@ -177,41 +214,21 @@ fn modifier_mask(key_code: i32) -> u64 {
     }
 }
 
-unsafe fn schedule_caps_release(info: *mut c_void) {
-    let mut ctx = CFRunLoopTimerContext {
-        version: 0,
-        info,
-        retain: ptr::null(),
-        release: ptr::null(),
-        copy_description: ptr::null(),
-    };
-    let timer = CFRunLoopTimerCreate(
-        ptr::null(),
-        CFAbsoluteTimeGetCurrent() + CAPS_RELEASE_DELAY_S,
-        0.0,
-        0,
-        0,
-        caps_release,
-        &mut ctx,
-    );
-    if !timer.is_null() {
-        CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes);
-        CFRelease(timer);
-    }
-}
-
-unsafe extern "C" fn caps_release(_timer: *mut c_void, info: *mut c_void) {
+unsafe extern "C" fn caps_release(_timer: CFRunLoopTimerRef, info: *mut c_void) {
     let state = &*(info as *const TapState);
-    state.audio.play(state.caps_key_code.get(), SoundType::Release, mach_absolute_time());
+    if state.caps_pending.replace(false) {
+        state.audio.play(state.caps_key_code.get(), SoundType::Release, mach_absolute_time());
+    }
 }
 
 type CGEventRef = *mut c_void;
 type CFMachPortRef = *mut c_void;
 type CFRunLoopSourceRef = *mut c_void;
 type CFRunLoopRef = *mut c_void;
+type CFRunLoopTimerRef = *mut c_void;
 type CFStringRef = *const c_void;
 type TapCallback = unsafe extern "C" fn(*mut c_void, u32, CGEventRef, *mut c_void) -> CGEventRef;
-type TimerCallback = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type TimerCallback = unsafe extern "C" fn(CFRunLoopTimerRef, *mut c_void);
 
 #[repr(C)]
 struct CFRunLoopTimerContext {
@@ -252,8 +269,10 @@ extern "C" {
         order: isize,
         callout: TimerCallback,
         context: *mut CFRunLoopTimerContext,
-    ) -> *mut c_void;
-    fn CFRunLoopAddTimer(rl: CFRunLoopRef, timer: *mut c_void, mode: CFStringRef);
+    ) -> CFRunLoopTimerRef;
+    fn CFRunLoopAddTimer(rl: CFRunLoopRef, timer: CFRunLoopTimerRef, mode: CFStringRef);
+    fn CFRunLoopTimerSetNextFireDate(timer: CFRunLoopTimerRef, fire_date: f64);
+    fn CFRunLoopTimerInvalidate(timer: CFRunLoopTimerRef);
     fn CFAbsoluteTimeGetCurrent() -> f64;
     fn CFRelease(cf: *const c_void);
 }
