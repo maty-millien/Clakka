@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+echo "Running cargo fmt"
+cargo fmt
+
+echo "Running cargo clippy"
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "Running cargo build"
+cargo build --locked

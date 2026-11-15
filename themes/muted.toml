@@ -1,0 +1,26 @@
+[master]
+seed = 0x4B52454D4D555401
+peak_db = -9
+
+[low]
+t60_ms = [50, 40, 60, 45]
+gains_db = [-14, -12, -20, -17]
+
+[plate]
+gains_db = [-7.6, -9.2, 1.0, -9.2, -2.4, -22.1, -2.4, -22.1, -2.4, -22.1, -6.2, -9.5]
+
+[switch]
+gains_db = [-14, -22, -26, -34]
+
+[noise]
+hp_hz = 400
+lp_hz = 4000
+t60_ms = 15
+level_db = -15
+
+[hit]
+width_ms = [1.2, 2.0]
+sec_level_db = [-30, -26]
+
+[release]
+level_db = -6

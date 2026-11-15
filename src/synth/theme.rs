@@ -92,7 +92,12 @@ pub struct KeyVoice {
 }
 
 pub const KEY_VOICES: usize = 8;
-pub const UNUSED: KeyVoice = KeyVoice { code: u32::MAX, gains_db: [0.0; 5], decay: 1.0, level_db: 0.0 };
+pub const UNUSED: KeyVoice = KeyVoice {
+    code: u32::MAX,
+    gains_db: [0.0; 5],
+    decay: 1.0,
+    level_db: 0.0,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Master {
@@ -105,7 +110,7 @@ pub struct Master {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Profile {
+pub struct Theme {
     pub master: Master,
     pub low: Low,
     pub plate: Plate,
@@ -120,8 +125,8 @@ pub struct Profile {
     pub keys: [KeyVoice; KEY_VOICES],
 }
 
-impl Profile {
-    pub const CREAMY: Profile = Profile {
+impl Theme {
+    pub const CREAMY: Theme = Theme {
         master: Master {
             seed: 0x4B52_4541_4D00_0001,
             peak_db: -6.0,
@@ -142,9 +147,16 @@ impl Profile {
         },
         plate: Plate {
             modes: Group {
-                freqs: [1383.0, 1431.0, 1539.0, 1749.0, 1841.0, 1991.0, 2045.0, 2088.0, 2147.0, 2217.0, 2390.0, 2551.0],
-                t60_ms: [16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0],
-                gains_db: [-3.6, -5.2, 5.0, -5.2, 1.6, -18.1, 1.6, -18.1, 1.6, -18.1, -2.2, -5.5],
+                freqs: [
+                    1383.0, 1431.0, 1539.0, 1749.0, 1841.0, 1991.0, 2045.0, 2088.0, 2147.0, 2217.0,
+                    2390.0, 2551.0,
+                ],
+                t60_ms: [
+                    16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0,
+                ],
+                gains_db: [
+                    -3.6, -5.2, 5.0, -5.2, 1.6, -18.1, 1.6, -18.1, 1.6, -18.1, -2.2, -5.5,
+                ],
                 detune: 0.01,
             },
             floor: 0.35,
@@ -161,8 +173,18 @@ impl Profile {
             gains_db: [-5.0, -13.0, -17.0, -27.0],
             detune: 0.03,
         },
-        noise: Noise { hp_hz: 900.0, lp_hz: 5000.0, attack_ms: 0.3, t60_ms: 22.0, level_db: -16.0 },
-        hit: Hit { width_ms: [0.4, 0.7], sec_gap_ms: [6.0, 13.0], sec_level_db: [-20.0, -14.0] },
+        noise: Noise {
+            hp_hz: 900.0,
+            lp_hz: 5000.0,
+            attack_ms: 0.3,
+            t60_ms: 22.0,
+            level_db: -16.0,
+        },
+        hit: Hit {
+            width_ms: [0.4, 0.7],
+            sec_gap_ms: [6.0, 13.0],
+            sec_level_db: [-20.0, -14.0],
+        },
         variation: Variation {
             pitch: 0.003,
             pitch_clip: 0.008,
@@ -209,7 +231,6 @@ impl Profile {
 
 trait Field {
     fn parse(&mut self, words: &[&str]) -> Result<(), String>;
-    fn show(&self) -> String;
 }
 
 fn parse_one<T: std::str::FromStr>(w: &str) -> Result<T, String> {
@@ -226,9 +247,6 @@ impl Field for f32 {
             _ => Err(format!("expected 1 value, got {}", words.len())),
         }
     }
-    fn show(&self) -> String {
-        format!("{self}")
-    }
 }
 
 impl Field for u64 {
@@ -236,7 +254,8 @@ impl Field for u64 {
         match words {
             [w] => {
                 *self = match w.strip_prefix("0x") {
-                    Some(h) => u64::from_str_radix(&h.replace('_', ""), 16).map_err(|_| format!("invalid hex '{w}'"))?,
+                    Some(h) => u64::from_str_radix(&h.replace('_', ""), 16)
+                        .map_err(|_| format!("invalid hex '{w}'"))?,
                     None => parse_one(w)?,
                 };
                 Ok(())
@@ -244,12 +263,9 @@ impl Field for u64 {
             _ => Err(format!("expected 1 value, got {}", words.len())),
         }
     }
-    fn show(&self) -> String {
-        format!("0x{self:016X}")
-    }
 }
 
-impl<T: std::str::FromStr + std::fmt::Display + Copy, const N: usize> Field for [T; N] {
+impl<T: std::str::FromStr + Copy, const N: usize> Field for [T; N] {
     fn parse(&mut self, words: &[&str]) -> Result<(), String> {
         if words.len() != N {
             return Err(format!("expected {N} values, got {}", words.len()));
@@ -259,19 +275,20 @@ impl<T: std::str::FromStr + std::fmt::Display + Copy, const N: usize> Field for 
         }
         Ok(())
     }
-    fn show(&self) -> String {
-        self.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(" ")
-    }
 }
 
-fn group<const N: usize>(s: &'static str, g: &mut Group<N>, f: &mut dyn FnMut(&'static str, &'static str, &mut dyn Field)) {
+fn group<const N: usize>(
+    s: &'static str,
+    g: &mut Group<N>,
+    f: &mut dyn FnMut(&'static str, &'static str, &mut dyn Field),
+) {
     f(s, "freqs", &mut g.freqs);
     f(s, "t60_ms", &mut g.t60_ms);
     f(s, "gains_db", &mut g.gains_db);
     f(s, "detune", &mut g.detune);
 }
 
-fn visit(p: &mut Profile, f: &mut dyn FnMut(&'static str, &'static str, &mut dyn Field)) {
+fn visit(p: &mut Theme, f: &mut dyn FnMut(&'static str, &'static str, &mut dyn Field)) {
     let m = &mut p.master;
     f("master", "seed", &mut m.seed);
     f("master", "peak_db", &mut m.peak_db);
@@ -334,14 +351,15 @@ fn visit(p: &mut Profile, f: &mut dyn FnMut(&'static str, &'static str, &mut dyn
     f("release", "sec_level_db", &mut r.sec_level_db);
 }
 
-impl Profile {
-    pub fn load(path: &str) -> Result<Profile, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read profile {path}: {e}"))?;
-        Profile::parse(&text).map_err(|e| format!("{path}: {e}"))
+impl Theme {
+    pub fn load(path: &str) -> Result<Theme, String> {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("cannot read theme {path}: {e}"))?;
+        Theme::parse(&text).map_err(|e| format!("{path}: {e}"))
     }
 
-    pub fn parse(text: &str) -> Result<Profile, String> {
-        let mut p = Profile::CREAMY;
+    pub fn parse(text: &str) -> Result<Theme, String> {
+        let mut p = Theme::CREAMY;
         let mut section = String::new();
         for (n, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap_or("").trim();
@@ -359,15 +377,26 @@ impl Profile {
                 Some((s, k)) => (s.trim().to_string(), k.trim()),
                 None => (section.clone(), key.trim()),
             };
-            let words: Vec<&str> = value.split_whitespace().collect();
+            let value = value.trim();
+            let value = value
+                .strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .unwrap_or(value);
+            let words: Vec<&str> = value
+                .split([',', ' ', '\t'])
+                .filter(|w| !w.is_empty())
+                .collect();
             if sec == "keys" {
-                p.set_key(key, &words).map_err(|e| format!("line {}: keys.{key}: {e}", n + 1))?;
+                p.set_key(key, &words)
+                    .map_err(|e| format!("line {}: keys.{key}: {e}", n + 1))?;
                 continue;
             }
             let mut result = Err(format!("line {}: unknown key {sec}.{key}", n + 1));
             visit(&mut p, &mut |s, k, field| {
                 if s == sec && k == key {
-                    result = field.parse(&words).map_err(|e| format!("line {}: {sec}.{key}: {e}", n + 1));
+                    result = field
+                        .parse(&words)
+                        .map_err(|e| format!("line {}: {sec}.{key}: {e}", n + 1));
                 }
             });
             result?;
@@ -375,29 +404,12 @@ impl Profile {
         Ok(p)
     }
 
-    pub fn to_text(self) -> String {
-        let mut p = self;
-        let mut out = String::new();
-        let mut current = "";
-        visit(&mut p, &mut |s, k, field| {
-            if s != current {
-                out.push_str(&format!("{}[{s}]\n", if current.is_empty() { "" } else { "\n" }));
-                current = s;
-            }
-            out.push_str(&format!("{k} = {}\n", field.show()));
-        });
-        let used: Vec<&KeyVoice> = self.keys.iter().filter(|k| k.code != u32::MAX).collect();
-        if !used.is_empty() {
-            out.push_str("\n[keys]\n");
-            for k in used {
-                out.push_str(&format!("{} = {} {} {}\n", k.code, k.gains_db.show(), k.decay, k.level_db));
-            }
-        }
-        out
-    }
-
     fn set_key(&mut self, key: &str, words: &[&str]) -> Result<(), String> {
-        let code: u32 = key.parse().ok().filter(|c| *c < 128).ok_or_else(|| format!("invalid key code '{key}'"))?;
+        let code: u32 = key
+            .parse()
+            .ok()
+            .filter(|c| *c < 128)
+            .ok_or_else(|| format!("invalid key code '{key}'"))?;
         let mut values = [0.0f32; 7];
         values.parse(words)?;
         let slot = self

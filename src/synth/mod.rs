@@ -1,13 +1,13 @@
 pub mod layout;
-pub mod profile;
 pub mod rng;
+pub mod theme;
 pub mod wav_out;
 
 use std::f32::consts::PI;
 
 use layout::KeyGeom;
-use profile::{Group, Profile};
 use rng::{splitmix64, Xorshift32, GOLDEN};
+use theme::{Group, Theme};
 
 pub const MODES: usize = 24;
 pub const VOICES: usize = 24;
@@ -40,7 +40,10 @@ impl Field {
             let c = 1.0 / rng.range(8.0, 20.0);
             [c * a.cos(), c * a.sin()]
         };
-        Field { k: [wave(rng), wave(rng)], phase: [2.0 * PI * rng.uniform(), 2.0 * PI * rng.uniform()] }
+        Field {
+            k: [wave(rng), wave(rng)],
+            phase: [2.0 * PI * rng.uniform(), 2.0 * PI * rng.uniform()],
+        }
     }
 
     fn at(&self, g: &KeyGeom) -> f32 {
@@ -189,11 +192,20 @@ fn set_group<const N: usize>(
     }
 }
 
-fn key_model(p: &Profile, patterns: &[[f32; 2]; 12], fields: &Fields, code: usize, fs: f32) -> KeyModel {
+fn key_model(
+    p: &Theme,
+    patterns: &[[f32; 2]; 12],
+    fields: &Fields,
+    code: usize,
+    fs: f32,
+) -> KeyModel {
     let seed = splitmix64(p.master.seed ^ (code as u64).wrapping_mul(GOLDEN));
     let mut rng = Xorshift32::new((seed ^ (seed >> 32)) as u32);
-    let geom = layout::geometry(code as u8)
-        .unwrap_or_else(|| KeyGeom { x: rng.uniform(), y: rng.uniform(), width: 1.0 });
+    let geom = layout::geometry(code as u8).unwrap_or_else(|| KeyGeom {
+        x: rng.uniform(),
+        y: rng.uniform(),
+        width: 1.0,
+    });
     let large = geom.width >= p.stab.min_width;
     let octaves = geom.width.max(1.0).log2();
     let damping = 1.0 + (p.stab.damping - 1.0) * ((geom.width - 1.0) / 5.25).clamp(0.0, 1.0);
@@ -241,13 +253,20 @@ fn key_model(p: &Profile, patterns: &[[f32; 2]; 12], fields: &Fields, code: usiz
         k.w[m] = w;
         k.cos[m] = w.cos();
         k.sin[m] = w.sin();
-        k.norm[m] = if m < PLATE { w.sin() } else { w.sin() / (4.0 * (0.5 * w).sin().powi(2)) };
+        k.norm[m] = if m < PLATE {
+            w.sin()
+        } else {
+            w.sin() / (4.0 * (0.5 * w).sin().powi(2))
+        };
         k.lnr[m] = -LN_1000 / (t60[m].max(0.002) * damping * fs);
         k.amp[m] = gains[m];
     }
     let pan = ((geom.x - 0.5) * 2.0 * p.master.stereo_width).clamp(-1.0, 1.0);
     let angle = 0.25 * PI * (pan + 1.0);
-    k.gain = [angle.cos() * std::f32::consts::SQRT_2, angle.sin() * std::f32::consts::SQRT_2];
+    k.gain = [
+        angle.cos() * std::f32::consts::SQRT_2,
+        angle.sin() * std::f32::consts::SQRT_2,
+    ];
     let lag = ((ITD_S * fs * pan.abs()) as u32).min(RING as u32 - 1);
     let shade = 1.0 - (-2.0 * PI * (18_000.0 - 12_000.0 * pan.abs()).min(0.45 * fs) / fs).exp();
     let far = usize::from(pan < 0.0);
@@ -276,12 +295,16 @@ pub fn group(m: usize) -> usize {
 }
 
 impl SynthBank {
-    pub fn new(p: &Profile, sample_rate: f64) -> Box<SynthBank> {
+    pub fn new(p: &Theme, sample_rate: f64) -> Box<SynthBank> {
         let fs = sample_rate as f32;
         let ms = 0.001 * fs;
         let mut prng = Xorshift32::new((p.master.seed ^ (p.master.seed >> 32)) as u32);
-        let patterns: [[f32; 2]; 12] =
-            std::array::from_fn(|_| [(1 + prng.next_u32() % 4) as f32, (1 + prng.next_u32() % 4) as f32]);
+        let patterns: [[f32; 2]; 12] = std::array::from_fn(|_| {
+            [
+                (1 + prng.next_u32() % 4) as f32,
+                (1 + prng.next_u32() % 4) as f32,
+            ]
+        });
         let r = &p.release;
         let mut rel_gain = [0.0; MODES];
         for (m, g) in rel_gain.iter_mut().enumerate() {
@@ -306,7 +329,10 @@ impl SynthBank {
                 vel_hardness: p.velocity.hardness,
                 vel_gap: p.velocity.gap,
                 stab_delay: [p.stab.delay_ms[0] * ms, p.stab.delay_ms[1] * ms],
-                stab_level: [p.stab.level_db[0] * NEPER_PER_DB, p.stab.level_db[1] * NEPER_PER_DB],
+                stab_level: [
+                    p.stab.level_db[0] * NEPER_PER_DB,
+                    p.stab.level_db[1] * NEPER_PER_DB,
+                ],
                 rel_hardness: r.hardness,
                 rel_decay: r.decay,
                 rel_gain,
@@ -320,7 +346,9 @@ impl SynthBank {
                 noise_attack: (p.noise.attack_ms * ms).max(1.0),
                 noise_lnr: -LN_1000 / (p.noise.t60_ms.max(1.0) * ms),
                 drive: 1.0 - (-2.0 * PI * p.low.drive_hz.clamp(10.0, 0.45 * fs) / fs).exp(),
-                drive_tail: (LN_1000 * 3.0 * fs / (2.0 * PI * p.low.drive_hz.clamp(10.0, 0.45 * fs))) as u32,
+                drive_tail: (LN_1000 * 3.0 * fs
+                    / (2.0 * PI * p.low.drive_hz.clamp(10.0, 0.45 * fs)))
+                    as u32,
             },
         });
         let fields = Fields::new(p.master.seed);
@@ -349,7 +377,7 @@ impl SynthBank {
         peak
     }
 
-    fn normalize(&mut self, p: &Profile, target: f32, release: f32) {
+    fn normalize(&mut self, p: &Theme, target: f32, release: f32) {
         let saved: [f32; KEYS] = std::array::from_fn(|k| self.keys[k].noise_amp);
         for k in self.keys.iter_mut() {
             k.noise_amp = 0.0;
@@ -365,7 +393,10 @@ impl SynthBank {
         self.params.rel_level = 1.0;
         self.params.rel_level = target * release / self.nominal_peak(REFERENCE_KEY, true).max(1e-9);
         let scales: Vec<f32> = (0..KEYS)
-            .map(|code| target * db(p.key_voice(code as u32).level_db) / self.nominal_peak(code, false).max(1e-9))
+            .map(|code| {
+                target * db(p.key_voice(code as u32).level_db)
+                    / self.nominal_peak(code, false).max(1e-9)
+            })
             .collect();
         for (k, s) in self.keys.iter_mut().zip(scales) {
             k.scale(s);
@@ -553,8 +584,13 @@ impl SynthVoice {
         self.shade = [0.0; 2];
         self.ring = [0.0; RING];
         self.pos = 0;
-        let modal = if min_lnr < f32::MAX { (LN_1000 * TAIL / min_lnr) as u32 } else { 0 };
-        self.frames = modal.max(self.noise_end).max(self.exc_end) + self.delay[0].max(self.delay[1]);
+        let modal = if min_lnr < f32::MAX {
+            (LN_1000 * TAIL / min_lnr) as u32
+        } else {
+            0
+        };
+        self.frames =
+            modal.max(self.noise_end).max(self.exc_end) + self.delay[0].max(self.delay[1]);
     }
 
     #[inline]
@@ -562,14 +598,23 @@ impl SynthVoice {
         let total = out_l.len().min(out_r.len());
         let mut done = 0;
         while done < total && self.active() {
-            let edge = [self.exc_end, self.noise_end, self.frames].into_iter().filter(|&e| e > self.pos).min().unwrap_or(self.frames);
+            let edge = [self.exc_end, self.noise_end, self.frames]
+                .into_iter()
+                .filter(|&e| e > self.pos)
+                .min()
+                .unwrap_or(self.frames);
             let n = (total - done).min(BLOCK).min((edge - self.pos) as usize);
             let mut mono = [0.0f32; BLOCK];
             self.render_block(&mut mono[..n]);
             let start = self.pos - n as u32;
             let ([gl, gr], [dl, dr], [al, ar]) = (self.gain, self.delay, self.shadow);
             let [mut zl, mut zr] = self.shade;
-            for (i, ((l, r), s)) in out_l[done..done + n].iter_mut().zip(&mut out_r[done..done + n]).zip(&mono[..n]).enumerate() {
+            for (i, ((l, r), s)) in out_l[done..done + n]
+                .iter_mut()
+                .zip(&mut out_r[done..done + n])
+                .zip(&mono[..n])
+                .enumerate()
+            {
                 let t = start + i as u32;
                 self.ring[t as usize % RING] = *s;
                 zl += al * (self.ring[t.wrapping_sub(dl) as usize % RING] - zl);
@@ -658,14 +703,24 @@ impl SynthVoice {
 
     #[inline(always)]
     fn noise(&mut self, out: &mut [f32]) {
-        let (a, b, amp, mul, step) = (self.hp_a, self.lp_b, self.noise_amp, self.env_mul, self.att_step);
+        let (a, b, amp, mul, step) = (
+            self.hp_a,
+            self.lp_b,
+            self.noise_amp,
+            self.env_mul,
+            self.att_step,
+        );
         let (mut hx, mut hy, mut ly, mut env) = (self.hp_x, self.hp_y, self.lp_y, self.env);
         for (t, o) in (self.pos..).zip(out.iter_mut()) {
             let x = self.noise_rng.bipolar();
             hy = a * (hy + x - hx);
             hx = x;
             ly += b * (hy - ly);
-            env = if t < self.att_end { env + step } else { env * mul };
+            env = if t < self.att_end {
+                env + step
+            } else {
+                env * mul
+            };
             *o += ly * env * amp;
         }
         self.hp_x = hx;
