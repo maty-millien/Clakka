@@ -439,7 +439,7 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
     let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
     let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
 
-    let mut fmt: Option<(u16, usize, u32, usize)> = None;
+    let mut fmt: Option<(u16, usize, u32, usize, usize)> = None;
     let mut data: Option<&[u8]> = None;
     let mut i = 12;
     while i + 8 <= b.len() {
@@ -453,7 +453,13 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
                 if tag == 0xFFFE && end - body >= 26 {
                     tag = u16_at(body + 24);
                 }
-                fmt = Some((tag, u16_at(body + 2) as usize, u32_at(body + 4), u16_at(body + 14) as usize));
+                fmt = Some((
+                    tag,
+                    u16_at(body + 2) as usize,
+                    u32_at(body + 4),
+                    u16_at(body + 12) as usize,
+                    u16_at(body + 14) as usize,
+                ));
             }
             b"data" => data = Some(&b[body..end]),
             _ => {}
@@ -461,12 +467,19 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
         i = body.saturating_add(size).saturating_add(size & 1);
     }
 
-    let (tag, channels, rate, bits) = fmt?;
+    let (tag, channels, rate, block_align, bits) = fmt?;
     let data = data?;
-    if channels == 0 || bits == 0 || bits % 8 != 0 {
+    if channels == 0 || rate == 0 || bits == 0 {
         return None;
     }
-    let bps = bits / 8;
+    let bps = if block_align != 0 && block_align % channels == 0 {
+        block_align / channels
+    } else {
+        bits.div_ceil(8)
+    };
+    if bits > bps * 8 {
+        return None;
+    }
     let frame_bytes = bps * channels;
     let frames = data.len() / frame_bytes;
     if frames == 0 {
@@ -616,4 +629,76 @@ extern "C" {
     fn mach_timebase_info(info: *mut MachTimebaseInfo) -> c_int;
     fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
     fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wav(tag: u16, channels: u16, block_align: u16, bits: u16, extensible: Option<u16>, data: &[u8]) -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend(extensible.map_or(tag, |_| 0xFFFE).to_le_bytes());
+        fmt.extend(channels.to_le_bytes());
+        fmt.extend(48_000u32.to_le_bytes());
+        fmt.extend((48_000 * u32::from(block_align)).to_le_bytes());
+        fmt.extend(block_align.to_le_bytes());
+        fmt.extend(bits.to_le_bytes());
+        if let Some(valid) = extensible {
+            fmt.extend(22u16.to_le_bytes());
+            fmt.extend(valid.to_le_bytes());
+            fmt.extend(3u32.to_le_bytes());
+            fmt.extend(tag.to_le_bytes());
+            fmt.extend([0u8; 14]);
+        }
+        let mut b = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        b.extend((fmt.len() as u32).to_le_bytes());
+        b.extend(fmt);
+        b.extend(b"data");
+        b.extend((data.len() as u32).to_le_bytes());
+        b.extend(data);
+        b
+    }
+
+    fn samples(s: &Sound) -> (Vec<f32>, Vec<f32>) {
+        (s.data[..s.frames].to_vec(), s.data[s.right_offset..s.right_offset + s.frames].to_vec())
+    }
+
+    #[test]
+    fn decodes_16_bit_stereo() {
+        let data: Vec<u8> = [16384i16, -32768, -16384, 32767].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (s, rate) = decode_wav(&wav(1, 2, 4, 16, None, &data)).unwrap();
+        assert_eq!(rate, 48_000.0);
+        assert_eq!(samples(&s), (vec![0.5, -0.5], vec![-1.0, 32767.0 / 32768.0]));
+    }
+
+    #[test]
+    fn decodes_24_bit_in_32_bit_container() {
+        let data: Vec<u8> = [0x40_0000i32 << 8, -0x40_0000 << 8].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (s, _) = decode_wav(&wav(1, 2, 8, 24, None, &data)).unwrap();
+        assert_eq!(samples(&s), (vec![0.5], vec![-0.5]));
+        let (s, _) = decode_wav(&wav(1, 2, 8, 32, Some(24), &data)).unwrap();
+        assert_eq!(samples(&s), (vec![0.5], vec![-0.5]));
+    }
+
+    #[test]
+    fn decodes_12_and_20_bit() {
+        let data: Vec<u8> = [0x400i16 << 4, -0x400 << 4].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (s, _) = decode_wav(&wav(1, 1, 2, 12, None, &data)).unwrap();
+        assert_eq!(samples(&s).0, vec![0.5, -0.5]);
+        let data = [0x00, 0x00, 0x40, 0x00, 0x00, 0xC0];
+        let (s, _) = decode_wav(&wav(1, 1, 3, 20, None, &data)).unwrap();
+        assert_eq!(samples(&s).0, vec![0.5, -0.5]);
+    }
+
+    #[test]
+    fn decodes_float() {
+        let data: Vec<u8> = [0.25f32, -0.75].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (s, _) = decode_wav(&wav(3, 1, 4, 32, None, &data)).unwrap();
+        assert_eq!(samples(&s).0, vec![0.25, -0.75]);
+    }
+
+    #[test]
+    fn rejects_bits_larger_than_container() {
+        assert!(decode_wav(&wav(1, 1, 2, 24, None, &[0; 4])).is_none());
+    }
 }
