@@ -1,6 +1,5 @@
 [master]
 seed = 0x4B52454D4D555401
-peak_db = -9
 
 [low]
 t60_ms = [50, 40, 60, 45]

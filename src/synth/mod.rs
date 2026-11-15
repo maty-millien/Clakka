@@ -25,7 +25,10 @@ const TAIL: f32 = 1.05;
 const REFERENCE_KEY: usize = 0;
 const RING: usize = 32;
 const BOARD_UNITS: [f32; 2] = [15.0, 6.0];
-const ITD_S: f32 = 0.000_28;
+const ITD_S: f32 = 0.000_17;
+const LOUDNESS_TARGET: f64 = 1e-4;
+const REFERENCE_PEAK: f32 = 0.5;
+const HEADROOM: f32 = 0.75;
 
 #[derive(Clone, Copy)]
 struct Field {
@@ -355,13 +358,17 @@ impl SynthBank {
         for (code, k) in bank.keys.iter_mut().enumerate() {
             *k = key_model(p, &patterns, &fields, code, fs);
         }
-        bank.normalize(p, db(p.master.peak_db), db(p.release.level_db));
+        bank.normalize(p, db(p.release.level_db), fs);
         bank
     }
 
     fn nominal_peak(&mut self, code: usize, release: bool) -> f32 {
+        self.peak(code, release, false)
+    }
+
+    fn peak(&mut self, code: usize, release: bool, spatial: bool) -> f32 {
         self.params.var = 0.0;
-        self.params.spatial = false;
+        self.params.spatial = spatial;
         let mut v = SynthVoice::IDLE;
         v.start(self, code, release, 0, 1);
         self.params.var = 1.0;
@@ -372,12 +379,39 @@ impl SynthBank {
             l.fill(0.0);
             r.fill(0.0);
             v.render(&mut l, &mut r);
-            peak = l.iter().fold(peak, |a, x| a.max(x.abs()));
+            peak = l.iter().chain(&r).fold(peak, |a, x| a.max(x.abs()));
         }
         peak
     }
 
-    fn normalize(&mut self, p: &Theme, target: f32, release: f32) {
+    fn loudness(&mut self, code: usize, release: bool, fs: f32) -> f64 {
+        self.params.var = 0.0;
+        let mut v = SynthVoice::IDLE;
+        v.start(self, code, release, 0, 1);
+        self.params.var = 1.0;
+        let (shelf, hp) = k_weighting(f64::from(fs));
+        let mut state = [[0.0f64; 4]; 6];
+        let mut e = [0.0f64; 3];
+        let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
+        while v.active() {
+            l.fill(0.0);
+            r.fill(0.0);
+            v.render(&mut l, &mut r);
+            for (a, b) in l.iter().zip(&r) {
+                let (a, b) = (f64::from(*a), f64::from(*b));
+                for (c, x) in [a, b, 0.5 * (a + b)].into_iter().enumerate() {
+                    let shelved = biquad(&shelf, &mut state[2 * c], x);
+                    let y = biquad(&hp, &mut state[2 * c + 1], shelved);
+                    e[c] += y * y;
+                }
+            }
+        }
+        let fs = f64::from(fs);
+        (0.5 * (e[0] + e[1]) / fs * 2.0 * e[2] / fs).sqrt()
+    }
+
+    fn normalize(&mut self, p: &Theme, release: f32, fs: f32) {
+        let target = REFERENCE_PEAK;
         let saved: [f32; KEYS] = std::array::from_fn(|k| self.keys[k].noise_amp);
         for k in self.keys.iter_mut() {
             k.noise_amp = 0.0;
@@ -392,14 +426,30 @@ impl SynthBank {
         }
         self.params.rel_level = 1.0;
         self.params.rel_level = target * release / self.nominal_peak(REFERENCE_KEY, true).max(1e-9);
-        let scales: Vec<f32> = (0..KEYS)
-            .map(|code| {
-                target * db(p.key_voice(code as u32).level_db)
-                    / self.nominal_peak(code, false).max(1e-9)
-            })
+        let loudness: Vec<f64> = (0..KEYS)
+            .map(|code| self.loudness(code, false, fs).max(1e-20))
             .collect();
-        for (k, s) in self.keys.iter_mut().zip(scales) {
-            k.scale(s);
+        let placed: Vec<f64> = (0..KEYS)
+            .filter(|&c| layout::geometry(c as u8).is_some())
+            .map(|c| loudness[c])
+            .collect();
+        let mean = placed.iter().sum::<f64>() / placed.len().max(1) as f64;
+        let level = (LOUDNESS_TARGET / mean).sqrt();
+        for (code, k) in self.keys.iter_mut().enumerate() {
+            let even = (mean / loudness[code]).sqrt();
+            k.scale(db(p.key_voice(code as u32).level_db) * (even * level) as f32);
+        }
+        let press = self.loudness(REFERENCE_KEY, false, fs);
+        let released = self.loudness(REFERENCE_KEY, true, fs).max(1e-20);
+        self.params.rel_level *= release * (press / released).sqrt() as f32;
+        let loudest = (0..KEYS)
+            .map(|c| self.peak(c, false, true))
+            .fold(0.0f32, f32::max);
+        if loudest > HEADROOM {
+            let s = HEADROOM / loudest;
+            for k in self.keys.iter_mut() {
+                k.scale(s);
+            }
         }
     }
 }
@@ -728,4 +778,38 @@ impl SynthVoice {
         self.lp_y = ly;
         self.env = env;
     }
+}
+
+fn k_weighting(fs: f64) -> ([f64; 5], [f64; 5]) {
+    let (f0, gain_db, q) = (1681.974450955533, 3.999843853973347, 0.7071752369554196);
+    let a = 10f64.powf(gain_db / 40.0);
+    let w = 2.0 * std::f64::consts::PI * f0 / fs;
+    let (c, alpha) = (w.cos(), w.sin() / (2.0 * q));
+    let sa = 2.0 * a.sqrt() * alpha;
+    let a0 = (a + 1.0) - (a - 1.0) * c + sa;
+    let shelf = [
+        a * ((a + 1.0) + (a - 1.0) * c + sa) / a0,
+        -2.0 * a * ((a - 1.0) + (a + 1.0) * c) / a0,
+        a * ((a + 1.0) + (a - 1.0) * c - sa) / a0,
+        2.0 * ((a - 1.0) - (a + 1.0) * c) / a0,
+        ((a + 1.0) - (a - 1.0) * c - sa) / a0,
+    ];
+    let (f0, q) = (38.13547087602444, 0.5003270373238773);
+    let w = 2.0 * std::f64::consts::PI * f0 / fs;
+    let (c, alpha) = (w.cos(), w.sin() / (2.0 * q));
+    let a0 = 1.0 + alpha;
+    let hp = [
+        (1.0 + c) / 2.0 / a0,
+        -(1.0 + c) / a0,
+        (1.0 + c) / 2.0 / a0,
+        -2.0 * c / a0,
+        (1.0 - alpha) / a0,
+    ];
+    (shelf, hp)
+}
+
+fn biquad(k: &[f64; 5], z: &mut [f64; 4], x: f64) -> f64 {
+    let y = k[0] * x + k[1] * z[0] + k[2] * z[1] - k[3] * z[2] - k[4] * z[3];
+    *z = [x, z[0], y, z[2]];
+    y
 }

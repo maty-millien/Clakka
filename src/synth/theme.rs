@@ -102,7 +102,6 @@ pub const UNUSED: KeyVoice = KeyVoice {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Master {
     pub seed: u64,
-    pub peak_db: f32,
     pub stereo_width: f32,
     pub size_freq_exp: f32,
     pub size_decay_exp: f32,
@@ -129,7 +128,6 @@ impl Theme {
     pub const CREAMY: Theme = Theme {
         master: Master {
             seed: 0x4B52_4541_4D00_0001,
-            peak_db: -6.0,
             stereo_width: 0.6,
             size_freq_exp: -0.1,
             size_decay_exp: -0.25,
@@ -291,7 +289,6 @@ fn group<const N: usize>(
 fn visit(p: &mut Theme, f: &mut dyn FnMut(&'static str, &'static str, &mut dyn Field)) {
     let m = &mut p.master;
     f("master", "seed", &mut m.seed);
-    f("master", "peak_db", &mut m.peak_db);
     f("master", "stereo_width", &mut m.stereo_width);
     f("master", "size_freq_exp", &mut m.size_freq_exp);
     f("master", "size_decay_exp", &mut m.size_decay_exp);
