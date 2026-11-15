@@ -30,7 +30,8 @@ const FIELD_AUTOREPEAT: u32 = 8;
 /// State reachable from the tap callback; boxed so its address is stable.
 pub(crate) struct TapState<'a> {
     audio: &'a Audio,
-    last_flags: Cell<u64>,
+    /// Modifier flags seen by the previous FlagsChanged event; None before the first event.
+    last_flags: Cell<Option<u64>>,
     caps_key_code: Cell<i32>,
     tap: Cell<CFMachPortRef>,
 }
@@ -54,7 +55,7 @@ impl<'a> Input<'a> {
         Input {
             state: Box::new(TapState {
                 audio,
-                last_flags: Cell::new(0),
+                last_flags: Cell::new(None),
                 caps_key_code: Cell::new(0),
                 tap: Cell::new(ptr::null_mut()),
             }),
@@ -65,9 +66,6 @@ impl<'a> Input<'a> {
     pub fn start(&mut self) -> Result<(), TapError> {
         let mask = (1u64 << EVENT_KEY_DOWN) | (1u64 << EVENT_KEY_UP) | (1u64 << EVENT_FLAGS_CHANGED);
         unsafe {
-            // Current modifier state, so the first modifier event is compared against
-            // reality instead of against itself.
-            self.state.last_flags.set(CGEventSourceFlagsState(0)); // kCGEventSourceStateCombinedSessionState
             let tap = CGEventTapCreate(
                 1, // kCGSessionEventTap
                 0, // kCGHeadInsertEventTap
@@ -125,7 +123,10 @@ pub(crate) unsafe extern "C" fn keyboard_callback(
         EVENT_FLAGS_CHANGED => {
             let key_code = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as i32;
             let flags = CGEventGetFlags(event);
-            let changed = flags ^ state.last_flags.get();
+            // First event since start: the previous state is this one minus the modifier
+            // this key toggles (querying CGEventSourceFlagsState instead costs ~15 ms).
+            let last = state.last_flags.get().unwrap_or(flags ^ modifier_mask(key_code));
+            let changed = flags ^ last;
 
             for mask in MODIFIER_MASKS {
                 if changed & mask != 0 {
@@ -143,15 +144,17 @@ pub(crate) unsafe extern "C" fn keyboard_callback(
                 schedule_caps_release(user_info);
             }
 
-            state.last_flags.set(flags);
+            state.last_flags.set(Some(flags));
         }
         EVENT_KEY_DOWN => {
+            init_flags(state, event);
             if CGEventGetIntegerValueField(event, FIELD_AUTOREPEAT) == 0 {
                 let key_code = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as i32;
                 state.audio.play(key_code, SoundType::Press, event_time);
             }
         }
         EVENT_KEY_UP => {
+            init_flags(state, event);
             let key_code = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as i32;
             state.audio.play(key_code, SoundType::Release, event_time);
         }
@@ -165,6 +168,27 @@ pub(crate) unsafe extern "C" fn keyboard_callback(
         _ => {}
     }
     event
+}
+
+/// Key events carry the current modifier state: use the first one as the baseline.
+#[inline]
+unsafe fn init_flags(state: &TapState, event: CGEventRef) {
+    if state.last_flags.get().is_none() {
+        state.last_flags.set(Some(CGEventGetFlags(event)));
+    }
+}
+
+/// Flag toggled by a modifier key code (0 for anything else).
+fn modifier_mask(key_code: i32) -> u64 {
+    match key_code {
+        56 | 60 => MODIFIER_MASKS[0], // left/right shift
+        59 | 62 => MODIFIER_MASKS[1], // left/right control
+        58 | 61 => MODIFIER_MASKS[2], // left/right option
+        54 | 55 => MODIFIER_MASKS[3], // right/left command
+        63 => MODIFIER_MASKS[4],      // fn
+        57 => FLAG_ALPHA_SHIFT,       // caps lock
+        _ => 0,
+    }
 }
 
 unsafe fn schedule_caps_release(info: *mut c_void) {
@@ -227,7 +251,6 @@ extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventGetFlags(event: CGEventRef) -> u64;
     fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
-    fn CGEventSourceFlagsState(state: i32) -> u64;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
