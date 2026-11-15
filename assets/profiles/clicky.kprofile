@@ -1,0 +1,28 @@
+[master]
+seed = 0x4B52454D434C4B01
+
+[low]
+gains_db = -22 -20 -28 -25
+
+[switch]
+freqs = 3200 4000 4800 6000
+t60_ms = 6 5 5 4
+gains_db = 3 -4 -8 -16
+
+[noise]
+hp_hz = 2500
+lp_hz = 9000
+t60_ms = 12
+level_db = -10
+
+[hit]
+width_ms = 0.15 0.3
+sec_gap_ms = 3 6
+sec_level_db = -8 -4
+
+[release]
+hardness = 1.2
+switch_db = -4
+sec_chance = 0.8
+sec_gap_ms = 3 5
+sec_level_db = -8

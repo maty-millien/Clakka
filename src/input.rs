@@ -183,6 +183,9 @@ unsafe extern "C" fn keyboard_callback(
             init_flags(state, event);
             if CGEventGetIntegerValueField(event, FIELD_AUTOREPEAT) == 0 {
                 let key_code = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as i32;
+                if CGEventGetFlags(event) & SWITCH_FLAGS == SWITCH_FLAGS {
+                    switch_theme(state.audio, key_code);
+                }
                 state.audio.play(key_code, SoundType::Press, event_time);
             }
         }
@@ -200,6 +203,24 @@ unsafe extern "C" fn keyboard_callback(
         _ => {}
     }
     event
+}
+
+const SWITCH_FLAGS: u64 = MODIFIER_MASKS[1] | MODIFIER_MASKS[2] | MODIFIER_MASKS[3];
+const DIGIT_KEYS: [i32; 9] = [18, 19, 20, 21, 23, 22, 26, 28, 25];
+
+#[cold]
+fn switch_theme(audio: &Audio, key_code: i32) {
+    match key_code {
+        123 => audio.step_theme(-1),
+        124 => audio.step_theme(1),
+        _ => {
+            if let Some(i) = DIGIT_KEYS.iter().position(|&k| k == key_code) {
+                if i < audio.theme_count() {
+                    audio.set_theme(i);
+                }
+            }
+        }
+    }
 }
 
 #[inline]

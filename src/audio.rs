@@ -1,7 +1,7 @@
 use std::cell::{Cell, UnsafeCell};
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{fence, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 
 use crate::synth::profile::Profile;
 use crate::synth::rng::splitmix64;
@@ -115,7 +115,8 @@ impl TriggerQueue {
 struct Engine {
     queue: TriggerQueue,
     render: UnsafeCell<RenderState>,
-    synth: Option<Box<SynthBank>>,
+    banks: Vec<Box<SynthBank>>,
+    current: AtomicUsize,
 }
 
 pub struct Audio {
@@ -133,15 +134,17 @@ pub struct Audio {
     initialized: bool,
     latency_log: bool,
     timebase: MachTimebaseInfo,
-    mode: Mode,
+    mode: Cell<Mode>,
     velocity: Velocity,
+    theme_velocity: Vec<[f32; 3]>,
+    theme: Cell<usize>,
 }
 
 struct Velocity {
     ms_per_tick: f32,
-    window_ms: f32,
-    range_ms: f32,
-    smoothing: f32,
+    window_ms: Cell<f32>,
+    range_ms: Cell<f32>,
+    smoothing: Cell<f32>,
     counter: Cell<u64>,
     last_press: Cell<u64>,
     avg_ms: Cell<f32>,
@@ -153,9 +156,9 @@ impl Velocity {
     fn press(&self, now: u64) {
         let last = self.last_press.replace(now);
         let dt = if last == 0 { 1000.0 } else { (now.wrapping_sub(last) as f32 * self.ms_per_tick).min(1000.0) };
-        let avg = self.avg_ms.get() + self.smoothing * (dt - self.avg_ms.get());
+        let avg = self.avg_ms.get() + self.smoothing.get() * (dt - self.avg_ms.get());
         self.avg_ms.set(avg);
-        let v = ((self.window_ms - avg) / self.range_ms).clamp(0.0, 1.0);
+        let v = ((self.window_ms.get() - avg) / self.range_ms.get()).clamp(0.0, 1.0);
         self.value.set((v * 127.0 + 0.5) as u8);
     }
 
@@ -182,7 +185,8 @@ impl Audio {
                 next_synth: 0,
                 fp_ready: false,
             }),
-            synth: None,
+            banks: Vec::new(),
+            current: AtomicUsize::new(0),
         });
         let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
         unsafe { mach_timebase_info(&mut timebase) };
@@ -201,41 +205,73 @@ impl Audio {
             latency_log: std::env::var_os("KREAM_LATENCY_LOG").is_some_and(|v| v == "1"),
             velocity: Velocity {
                 ms_per_tick: (timebase.numer as f64 / timebase.denom as f64 / 1e6) as f32,
-                window_ms: 250.0,
-                range_ms: 200.0,
-                smoothing: 0.3,
+                window_ms: Cell::new(250.0),
+                range_ms: Cell::new(200.0),
+                smoothing: Cell::new(0.3),
                 counter: Cell::new(0),
                 last_press: Cell::new(0),
                 avg_ms: Cell::new(1000.0),
                 value: Cell::new(0),
             },
             timebase,
-            mode: Mode::Wav,
+            mode: Cell::new(Mode::Wav),
+            theme_velocity: Vec::new(),
+            theme: Cell::new(0),
         }
     }
 
-    pub fn sample_rate(&self) -> f64 {
-        self.sample_rate
-    }
-
-    fn prepare_synth(&mut self, profile: &Profile, rate: f64) {
-        let bank = SynthBank::new(profile, rate);
-        let v = &mut self.velocity;
-        v.window_ms = profile.velocity.window_ms;
-        v.range_ms = profile.velocity.range_ms.max(1.0);
-        v.smoothing = profile.velocity.smoothing.clamp(0.0, 1.0);
+    fn prepare_synth(&mut self, profiles: &[Profile], rate: f64) {
+        let banks = profiles.iter().map(|p| SynthBank::new(p, rate)).collect();
+        self.theme_velocity = profiles
+            .iter()
+            .map(|p| [p.velocity.window_ms, p.velocity.range_ms.max(1.0), p.velocity.smoothing.clamp(0.0, 1.0)])
+            .collect();
         self.sample_rate = rate;
-        unsafe { (*self.engine.as_ptr()).synth = Some(bank) };
+        unsafe { (*self.engine.as_ptr()).banks = banks };
         fence(Ordering::Release);
-        self.mode = Mode::Synth;
+        self.set_theme(0);
     }
 
-    pub fn start_synth(&mut self, profile: &Profile) -> bool {
-        !self.initialized && self.init_audio_unit(Some(profile))
+    pub fn start_synth(&mut self, profiles: &[Profile]) -> bool {
+        !self.initialized && self.init_audio_unit(Some(profiles))
     }
 
     pub fn open_offline(&mut self, profile: &Profile, rate: f64) {
-        self.prepare_synth(profile, rate);
+        self.prepare_synth(std::slice::from_ref(profile), rate);
+    }
+
+    pub fn theme_count(&self) -> usize {
+        self.theme_velocity.len() + usize::from(!self.sounds.is_empty())
+    }
+
+    pub fn theme(&self) -> usize {
+        self.theme.get()
+    }
+
+    pub fn set_theme(&self, index: usize) {
+        let count = self.theme_count();
+        if count == 0 {
+            return;
+        }
+        let index = index % count;
+        self.theme.set(index);
+        match self.theme_velocity.get(index) {
+            Some(&[window, range, smoothing]) => {
+                self.velocity.window_ms.set(window);
+                self.velocity.range_ms.set(range);
+                self.velocity.smoothing.set(smoothing);
+                unsafe { self.engine.as_ref() }.current.store(index, Ordering::Relaxed);
+                self.mode.set(Mode::Synth);
+            }
+            None => self.mode.set(Mode::Wav),
+        }
+    }
+
+    pub fn step_theme(&self, step: isize) {
+        let count = self.theme_count() as isize;
+        if count > 0 {
+            self.set_theme((self.theme.get() as isize + step).rem_euclid(count) as usize);
+        }
     }
 
     #[inline]
@@ -336,7 +372,7 @@ impl Audio {
 
     #[inline]
     pub fn play(&self, key_code: i32, ty: SoundType, event_time: u64) {
-        if self.mode == Mode::Synth {
+        if self.mode.get() == Mode::Synth {
             let now = if event_time != 0 { event_time } else { unsafe { mach_absolute_time() } };
             self.play_at(key_code, ty, now);
             if self.latency_log && event_time != 0 {
@@ -393,7 +429,7 @@ impl Audio {
         }
     }
 
-    fn init_audio_unit(&mut self, synth: Option<&Profile>) -> bool {
+    fn init_audio_unit(&mut self, synth: Option<&[Profile]>) -> bool {
         unsafe {
             let desc = AudioComponentDescription {
                 component_type: fourcc(b"auou"),
@@ -429,8 +465,8 @@ impl Audio {
                 .ok()
                 .filter(|r| *r > 0.0)
                 .unwrap_or(DEFAULT_SAMPLE_RATE);
-            if let Some(profile) = synth {
-                self.prepare_synth(profile, self.sample_rate);
+            if let Some(profiles) = synth {
+                self.prepare_synth(profiles, self.sample_rate);
             }
 
             let [min, max] = object_property::<[f64; 2]>(device_id, b"fsz#", SCOPE_GLOBAL_OBJECT)
@@ -553,7 +589,7 @@ unsafe extern "C" fn render_callback(
         st.fp_ready = true;
     }
 
-    let synth = engine.synth.as_deref();
+    let synth = engine.banks.get(engine.current.load(Ordering::Relaxed)).map(|b| &**b);
     engine.queue.drain(|word| {
         if word & SYNTH_BIT != 0 {
             if let Some(bank) = synth {
