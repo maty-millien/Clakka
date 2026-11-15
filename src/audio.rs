@@ -1,12 +1,33 @@
 use std::cell::{Cell, UnsafeCell};
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{fence, AtomicPtr, Ordering};
+use std::sync::atomic::{fence, AtomicU64, Ordering};
+
+use crate::synth::profile::Profile;
+use crate::synth::rng::splitmix64;
+use crate::synth::{SynthBank, SynthVoice, VOICES};
 
 pub const MAX_VOICES: usize = 16;
 const BUFFER_FRAMES: u32 = 128;
 const QUEUE_CAPACITY: usize = 64;
 const KEY_TABLE: usize = 128;
+const SYNTH_MAX_FRAMES: u32 = 4096;
+pub(crate) const SYNTH_BIT: u64 = 1 << 63;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Wav,
+    Synth,
+}
+
+#[inline(always)]
+pub(crate) fn synth_word(key_code: i32, ty: SoundType, velocity: u8, seed: u32) -> u64 {
+    SYNTH_BIT
+        | u64::from(seed) << 16
+        | u64::from(velocity & 0x7F) << 9
+        | (ty as u64) << 8
+        | (key_code as u64 & 0xFF)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SoundType {
@@ -42,7 +63,10 @@ const IDLE: Voice = Voice { left: ptr::null(), right: ptr::null(), frames: 0, po
 pub(crate) struct RenderState {
     pub(crate) voices: [Voice; MAX_VOICES],
     next_voice: usize,
+    synth_voices: [SynthVoice; VOICES],
+    next_synth: usize,
     rt_scheduled: bool,
+    fp_ready: bool,
     sample_rate: f64,
 }
 
@@ -50,36 +74,36 @@ pub(crate) struct RenderState {
 pub(crate) struct Padded<T>(pub(crate) T);
 
 pub(crate) struct TriggerQueue {
-    pub(crate) slots: [AtomicPtr<Sound>; QUEUE_CAPACITY],
+    pub(crate) slots: [AtomicU64; QUEUE_CAPACITY],
     head: Padded<Cell<usize>>,
     tail: Padded<Cell<usize>>,
 }
 
 impl TriggerQueue {
     #[inline]
-    fn push(&self, sound: *const Sound) -> bool {
+    fn push(&self, word: u64) -> bool {
         let head = self.head.0.get();
         let slot = &self.slots[head % QUEUE_CAPACITY];
-        if !slot.load(Ordering::Relaxed).is_null() {
+        if slot.load(Ordering::Relaxed) != 0 {
             return false;
         }
-        slot.store(sound.cast_mut(), Ordering::Relaxed);
+        slot.store(word, Ordering::Relaxed);
         self.head.0.set(head.wrapping_add(1));
         true
     }
 
     #[inline]
-    pub(crate) fn drain(&self, mut f: impl FnMut(&Sound)) {
+    pub(crate) fn drain(&self, mut f: impl FnMut(u64)) {
         let mut tail = self.tail.0.get();
         loop {
             let slot = &self.slots[tail % QUEUE_CAPACITY];
-            let sound = slot.load(Ordering::Relaxed);
-            if sound.is_null() {
+            let word = slot.load(Ordering::Relaxed);
+            if word == 0 {
                 break;
             }
-            slot.store(ptr::null_mut(), Ordering::Relaxed);
+            slot.store(0, Ordering::Relaxed);
             fence(Ordering::Acquire);
-            f(unsafe { &*sound });
+            f(word);
             tail = tail.wrapping_add(1);
         }
         self.tail.0.set(tail);
@@ -89,6 +113,7 @@ impl TriggerQueue {
 pub(crate) struct Engine {
     pub(crate) queue: TriggerQueue,
     pub(crate) render: UnsafeCell<RenderState>,
+    pub(crate) synth: Option<Box<SynthBank>>,
 }
 
 pub struct Audio {
@@ -103,22 +128,58 @@ pub struct Audio {
     sample_rate: f64,
     initialized: bool,
     timebase: MachTimebaseInfo,
+    mode: Mode,
+    velocity: Velocity,
+}
+
+struct Velocity {
+    ms_per_tick: f32,
+    window_ms: f32,
+    range_ms: f32,
+    smoothing: f32,
+    counter: Cell<u64>,
+    last_press: Cell<u64>,
+    avg_ms: Cell<f32>,
+    value: Cell<u8>,
+}
+
+impl Velocity {
+    #[inline(always)]
+    fn press(&self, now: u64) {
+        let last = self.last_press.replace(now);
+        let dt = if last == 0 { 1000.0 } else { (now.wrapping_sub(last) as f32 * self.ms_per_tick).min(1000.0) };
+        let avg = self.avg_ms.get() + self.smoothing * (dt - self.avg_ms.get());
+        self.avg_ms.set(avg);
+        let v = ((self.window_ms - avg) / self.range_ms).clamp(0.0, 1.0);
+        self.value.set((v * 127.0 + 0.5) as u8);
+    }
+
+    #[inline(always)]
+    fn seed(&self, now: u64) -> u32 {
+        let c = self.counter.get().wrapping_add(1);
+        self.counter.set(c);
+        splitmix64(c ^ now) as u32
+    }
 }
 
 impl Audio {
     pub fn new() -> Self {
         let engine = Box::new(Engine {
             queue: TriggerQueue {
-                slots: std::array::from_fn(|_| AtomicPtr::new(ptr::null_mut())),
+                slots: std::array::from_fn(|_| AtomicU64::new(0)),
                 head: Padded(Cell::new(0)),
                 tail: Padded(Cell::new(0)),
             },
             render: UnsafeCell::new(RenderState {
                 voices: [IDLE; MAX_VOICES],
                 next_voice: 0,
+                synth_voices: [SynthVoice::IDLE; VOICES],
+                next_synth: 0,
                 rt_scheduled: false,
+                fp_ready: false,
                 sample_rate: 0.0,
             }),
+            synth: None,
         });
         let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
         unsafe { mach_timebase_info(&mut timebase) };
@@ -132,7 +193,79 @@ impl Audio {
             next_fallback: [Cell::new(0), Cell::new(0)],
             sample_rate: 0.0,
             initialized: false,
+            velocity: Velocity {
+                ms_per_tick: (timebase.numer as f64 / timebase.denom as f64 / 1e6) as f32,
+                window_ms: 250.0,
+                range_ms: 200.0,
+                smoothing: 0.3,
+                counter: Cell::new(0),
+                last_press: Cell::new(0),
+                avg_ms: Cell::new(1000.0),
+                value: Cell::new(0),
+            },
             timebase,
+            mode: Mode::Wav,
+        }
+    }
+
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate
+    }
+
+    fn prepare_synth(&mut self, profile: &Profile, rate: f64) {
+        let bank = SynthBank::new(profile, rate);
+        let v = &mut self.velocity;
+        v.window_ms = profile.velocity.window_ms;
+        v.range_ms = profile.velocity.range_ms.max(1.0);
+        v.smoothing = profile.velocity.smoothing.clamp(0.0, 1.0);
+        self.sample_rate = rate;
+        unsafe {
+            let engine = &mut *self.engine.as_ptr();
+            (*engine.render.get()).sample_rate = rate;
+            engine.synth = Some(bank);
+        }
+        fence(Ordering::Release);
+        self.mode = Mode::Synth;
+    }
+
+    pub fn start_synth(&mut self, profile: &Profile) -> bool {
+        if self.initialized {
+            return false;
+        }
+        let Some(device) = default_output_device() else { return false };
+        let rate = device_sample_rate(device).unwrap_or(48_000.0);
+        self.prepare_synth(profile, rate);
+        self.open_unit(device, rate, true)
+    }
+
+    pub fn open_offline(&mut self, profile: &Profile, rate: f64) {
+        self.prepare_synth(profile, rate);
+    }
+
+    #[inline]
+    pub fn trigger(&self, key_code: i32, ty: SoundType, velocity: u8, seed: u32) -> bool {
+        unsafe { self.engine.as_ref() }.queue.push(synth_word(key_code, ty, velocity, seed))
+    }
+
+    pub fn render_offline(&self, left: &mut [f32], right: &mut [f32]) {
+        let frames = left.len().min(right.len()) as u32;
+        let mut list = TwoBuffers {
+            number_buffers: 2,
+            buffers: [
+                AudioBuffer { number_channels: 1, data_byte_size: frames * 4, data: left.as_mut_ptr().cast() },
+                AudioBuffer { number_channels: 1, data_byte_size: frames * 4, data: right.as_mut_ptr().cast() },
+            ],
+        };
+        let mut flags = 0u32;
+        unsafe {
+            render_callback(
+                self.engine.as_ptr().cast(),
+                &mut flags,
+                ptr::null(),
+                0,
+                frames,
+                (&raw mut list).cast::<AudioBufferList>(),
+            );
         }
     }
 
@@ -181,8 +314,29 @@ impl Audio {
         }
     }
 
+    #[inline(always)]
+    pub fn play_at(&self, key_code: i32, ty: SoundType, now: u64) -> bool {
+        if ty == SoundType::Press {
+            self.velocity.press(now);
+        }
+        let seed = self.velocity.seed(now);
+        self.trigger(key_code, ty, self.velocity.value.get(), seed)
+    }
+
+    pub fn ms_to_ticks(&self, ms: f64) -> u64 {
+        (ms * 1e6 * self.timebase.denom as f64 / self.timebase.numer as f64) as u64
+    }
+
     #[inline]
     pub fn play(&self, key_code: i32, ty: SoundType, event_time: u64) {
+        if self.mode == Mode::Synth {
+            let now = if event_time != 0 { event_time } else { unsafe { mach_absolute_time() } };
+            self.play_at(key_code, ty, now);
+            if event_time != 0 {
+                self.log_latency(key_code, ty, event_time);
+            }
+            return;
+        }
         let t = ty as usize;
         let mut sound = self.explicit_sound(t, key_code);
         if sound.is_null() {
@@ -194,7 +348,7 @@ impl Audio {
             self.next_fallback[t].set((idx + 1) % fallback.len());
             sound = fallback[idx];
         }
-        unsafe { self.engine.as_ref() }.queue.push(sound);
+        unsafe { self.engine.as_ref() }.queue.push(sound as u64);
 
         if event_time != 0 {
             self.log_latency(key_code, ty, event_time);
@@ -227,8 +381,16 @@ impl Audio {
     }
 
     fn init_audio_unit(&mut self, file_sample_rate: f64) -> bool {
+        if self.mode == Mode::Synth {
+            return false;
+        }
         self.sample_rate = file_sample_rate;
         unsafe { (*self.engine.as_ref().render.get()).sample_rate = file_sample_rate };
+        let Some(device_id) = default_output_device() else { return false };
+        self.open_unit(device_id, file_sample_rate, false)
+    }
+
+    fn open_unit(&mut self, device_id: u32, sample_rate: f64, synth: bool) -> bool {
         unsafe {
             let desc = AudioComponentDescription {
                 component_type: fourcc(b"auou"),
@@ -249,32 +411,13 @@ impl Audio {
                 return false;
             }
 
-            let mut device_id: u32 = 0;
-            let mut size = size_of::<u32>() as u32;
-            let mut addr = AudioObjectPropertyAddress {
-                selector: fourcc(b"dOut"),
+            self.set_property(AU_CURRENT_DEVICE, SCOPE_GLOBAL, 0, &device_id);
+
+            let addr = AudioObjectPropertyAddress {
+                selector: fourcc(b"fsiz"),
                 scope: SCOPE_GLOBAL_OBJECT,
                 element: 0,
             };
-            let status = AudioObjectGetPropertyData(
-                AUDIO_SYSTEM_OBJECT,
-                &addr,
-                0,
-                ptr::null(),
-                &mut size,
-                (&raw mut device_id).cast(),
-            );
-            if status != 0 {
-                eprintln!("Error: Failed to get default audio output device (OSStatus {status})");
-                AudioComponentInstanceDispose(self.audio_unit);
-                self.audio_unit = ptr::null_mut();
-                return false;
-            }
-
-            self.set_property(AU_CURRENT_DEVICE, SCOPE_GLOBAL, 0, &device_id);
-
-            addr.selector = fourcc(b"fsiz");
-            addr.scope = SCOPE_GLOBAL_OBJECT;
             AudioObjectSetPropertyData(
                 device_id,
                 &addr,
@@ -283,13 +426,18 @@ impl Audio {
                 size_of::<u32>() as u32,
                 (&BUFFER_FRAMES as *const u32).cast(),
             );
-            self.set_property(AU_MAX_FRAMES_PER_SLICE, SCOPE_GLOBAL, 0, &BUFFER_FRAMES);
+            let max_frames = if synth {
+                get_property::<u32>(device_id, fourcc(b"fsiz")).unwrap_or(BUFFER_FRAMES).max(SYNTH_MAX_FRAMES)
+            } else {
+                BUFFER_FRAMES
+            };
+            self.set_property(AU_MAX_FRAMES_PER_SLICE, SCOPE_GLOBAL, 0, &max_frames);
 
             self.set_property(AU_ENABLE_IO, SCOPE_INPUT, 1, &0u32);
             self.set_property(AU_ENABLE_IO, SCOPE_OUTPUT, 0, &1u32);
 
             let format = AudioStreamBasicDescription {
-                sample_rate: file_sample_rate,
+                sample_rate,
                 format_id: fourcc(b"lpcm"),
                 format_flags: 9 | 32,
                 bytes_per_packet: 4,
@@ -353,6 +501,43 @@ impl Drop for Audio {
     }
 }
 
+unsafe fn get_property<T: Copy + Default>(object: u32, selector: u32) -> Option<T> {
+    let addr = AudioObjectPropertyAddress { selector, scope: SCOPE_GLOBAL_OBJECT, element: 0 };
+    let mut value = T::default();
+    let mut size = size_of::<T>() as u32;
+    let status = AudioObjectGetPropertyData(object, &addr, 0, ptr::null(), &mut size, (&raw mut value).cast());
+    (status == 0 && size as usize == size_of::<T>()).then_some(value)
+}
+
+fn default_output_device() -> Option<u32> {
+    let device = unsafe { get_property::<u32>(AUDIO_SYSTEM_OBJECT, fourcc(b"dOut")) };
+    if device.is_none() {
+        eprintln!("Error: Failed to get default audio output device");
+    }
+    device
+}
+
+fn device_sample_rate(device: u32) -> Option<f64> {
+    unsafe { get_property::<f64>(device, fourcc(b"nsrt")) }.filter(|r| *r >= 8000.0)
+}
+
+#[inline]
+pub(crate) fn enable_flush_to_zero() {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let fpcr: u64;
+        std::arch::asm!("mrs {}, fpcr", out(reg) fpcr);
+        std::arch::asm!("msr fpcr, {}", in(reg) fpcr | (1 << 24));
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        let mut csr = 0u32;
+        std::arch::asm!("stmxcsr [{}]", in(reg) &raw mut csr);
+        csr |= 0x8040;
+        std::arch::asm!("ldmxcsr [{}]", in(reg) &raw const csr);
+    }
+}
+
 fn setup_realtime_thread(buffer_frames: u32, sample_rate: f64) {
     let period = ((buffer_frames as f64 / sample_rate) * 1e9) as u32;
     let computation = period / 2;
@@ -374,12 +559,31 @@ pub(crate) unsafe extern "C" fn render_callback(
     let engine = &*(ref_con as *const Engine);
     let st = &mut *engine.render.get();
 
+    if !st.fp_ready {
+        enable_flush_to_zero();
+        st.fp_ready = true;
+    }
     if !st.rt_scheduled {
         setup_realtime_thread(frames, st.sample_rate);
         st.rt_scheduled = true;
     }
 
-    engine.queue.drain(|s| {
+    let synth = engine.synth.as_deref();
+    engine.queue.drain(|word| {
+        if word & SYNTH_BIT != 0 {
+            if let Some(bank) = synth {
+                st.synth_voices[st.next_synth].start(
+                    bank,
+                    (word & 0x7F) as usize,
+                    word & 0x100 != 0,
+                    ((word >> 9) & 0x7F) as u8,
+                    (word >> 16) as u32,
+                );
+                st.next_synth = (st.next_synth + 1) % VOICES;
+            }
+            return;
+        }
+        let s = &*(word as *const Sound);
         let base = s.data.as_ptr();
         st.voices[st.next_voice] = Voice {
             left: base,
@@ -397,16 +601,22 @@ pub(crate) unsafe extern "C" fn render_callback(
     let n = frames as usize;
     let out_l = std::slice::from_raw_parts_mut((*bufs).data.cast::<f32>(), n);
     let out_r = std::slice::from_raw_parts_mut((*bufs.add(1)).data.cast::<f32>(), n);
-    mix(&mut st.voices, out_l, out_r);
+    mix(st, out_l, out_r);
     0
 }
 
 #[inline(always)]
-fn mix(voices: &mut [Voice; MAX_VOICES], out_l: &mut [f32], out_r: &mut [f32]) {
+fn mix(st: &mut RenderState, out_l: &mut [f32], out_r: &mut [f32]) {
     out_l.fill(0.0);
     out_r.fill(0.0);
     let mut active = false;
-    for v in voices.iter_mut() {
+    for v in st.synth_voices.iter_mut() {
+        if v.active() {
+            active = true;
+            v.render(out_l, out_r);
+        }
+    }
+    for v in st.voices.iter_mut() {
         if v.left.is_null() {
             continue;
         }
@@ -448,6 +658,12 @@ fn clip(out: &mut [f32]) {
 fn load_wav(path: &str) -> Option<(Sound, f64)> {
     let bytes = std::fs::read(path).ok()?;
     decode_wav(&bytes)
+}
+
+pub(crate) fn read_wav_mono(path: &str) -> Option<(Vec<f32>, f64)> {
+    let (s, rate) = load_wav(path)?;
+    let (l, r) = (&s.data[..s.frames], &s.data[s.right_offset..s.right_offset + s.frames]);
+    Some((l.iter().zip(r).map(|(a, b)| 0.5 * (a + b)).collect(), rate))
 }
 
 fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
@@ -593,6 +809,12 @@ pub(crate) struct AudioBufferList {
 }
 
 #[repr(C)]
+struct TwoBuffers {
+    number_buffers: u32,
+    buffers: [AudioBuffer; 2],
+}
+
+#[repr(C)]
 struct MachTimebaseInfo {
     numer: u32,
     denom: u32,
@@ -638,4 +860,63 @@ extern "C" {
     fn thread_policy_set(thread: u32, flavor: u32, info: *const u32, count: u32) -> c_int;
     fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
     fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synth_word_packs_fields() {
+        let w = synth_word(49, SoundType::Release, 100, 0xDEAD_BEEF);
+        assert_eq!(w >> 63, 1);
+        assert_eq!(w & 0xFF, 49);
+        assert_eq!((w >> 8) & 1, 1);
+        assert_eq!((w >> 9) & 0x7F, 100);
+        assert_eq!((w >> 16) as u32, 0xDEAD_BEEF);
+        assert_eq!(synth_word(300, SoundType::Press, 255, 0) & 0xFFFF, 300 & 0xFF | 0x7F << 9);
+    }
+
+    #[test]
+    fn callback_path_matches_direct_voice() {
+        let mut audio = Audio::new();
+        audio.open_offline(&Profile::CREAMY, 48_000.0);
+        assert!(audio.trigger(7, SoundType::Press, 30, 99));
+        let (mut l, mut r) = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+        for (cl, cr) in l.chunks_mut(32).zip(r.chunks_mut(32)) {
+            audio.render_offline(cl, cr);
+        }
+        let bank = SynthBank::new(&Profile::CREAMY, 48_000.0);
+        let mut v = SynthVoice::IDLE;
+        v.start(&bank, 7, false, 30, 99);
+        let (mut dl, mut dr) = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+        v.render(&mut dl, &mut dr);
+        for x in dl.iter_mut().chain(dr.iter_mut()) {
+            *x = x.clamp(-1.0, 1.0);
+        }
+        assert_eq!(l, dl);
+        assert_eq!(r, dr);
+        assert!(l.iter().any(|x| x.abs() > 0.01));
+    }
+
+    #[test]
+    fn velocity_follows_typing_speed() {
+        let mut audio = Audio::new();
+        audio.open_offline(&Profile::CREAMY, 48_000.0);
+        let mut t = audio.ms_to_ticks(1000.0);
+        audio.play_at(0, SoundType::Press, t);
+        assert_eq!(audio.velocity.value.get(), 0);
+        for _ in 0..20 {
+            t += audio.ms_to_ticks(60.0);
+            audio.play_at(0, SoundType::Press, t);
+            audio.render_offline(&mut [0.0; 32], &mut [0.0; 32]);
+        }
+        assert!(audio.velocity.value.get() > 100);
+        for _ in 0..20 {
+            t += audio.ms_to_ticks(600.0);
+            audio.play_at(0, SoundType::Press, t);
+            audio.render_offline(&mut [0.0; 32], &mut [0.0; 32]);
+        }
+        assert_eq!(audio.velocity.value.get(), 0);
+    }
 }
