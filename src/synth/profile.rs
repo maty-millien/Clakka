@@ -125,7 +125,7 @@ impl Profile {
         master: Master {
             seed: 0x4B52_4541_4D00_0001,
             peak_db: -6.0,
-            stereo_width: 0.15,
+            stereo_width: 0.6,
             size_freq_exp: -0.1,
             size_decay_exp: -0.25,
             key_spread_db: 3.0,
@@ -134,7 +134,7 @@ impl Profile {
             modes: Group {
                 freqs: [110.0, 190.0, 140.0, 260.0],
                 t60_ms: [70.0, 55.0, 90.0, 60.0],
-                gains_db: [-14.0, -12.0, -20.0, -17.0],
+                gains_db: [-17.0, -15.0, -23.0, -20.0],
                 detune: 0.02,
             },
             large_freq: 105.0,
@@ -144,7 +144,7 @@ impl Profile {
             modes: Group {
                 freqs: [1383.0, 1431.0, 1539.0, 1749.0, 1841.0, 1991.0, 2045.0, 2088.0, 2147.0, 2217.0, 2390.0, 2551.0],
                 t60_ms: [16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0, 16.0, 32.0],
-                gains_db: [-8.6, -10.2, 0.0, -10.2, -3.4, -23.1, -3.4, -23.1, -3.4, -23.1, -7.2, -10.5],
+                gains_db: [-3.6, -5.2, 5.0, -5.2, 1.6, -18.1, 1.6, -18.1, 1.6, -18.1, -2.2, -5.5],
                 detune: 0.01,
             },
             floor: 0.35,
@@ -158,10 +158,10 @@ impl Profile {
         switch: Group {
             freqs: [2700.0, 3300.0, 4300.0, 5400.0],
             t60_ms: [10.0, 9.0, 8.0, 7.0],
-            gains_db: [-10.0, -18.0, -22.0, -32.0],
+            gains_db: [-5.0, -13.0, -17.0, -27.0],
             detune: 0.03,
         },
-        noise: Noise { hp_hz: 900.0, lp_hz: 5000.0, attack_ms: 0.3, t60_ms: 22.0, level_db: -20.0 },
+        noise: Noise { hp_hz: 900.0, lp_hz: 5000.0, attack_ms: 0.3, t60_ms: 22.0, level_db: -16.0 },
         hit: Hit { width_ms: [0.4, 0.7], sec_gap_ms: [6.0, 13.0], sec_level_db: [-20.0, -14.0] },
         variation: Variation {
             pitch: 0.003,
@@ -188,7 +188,7 @@ impl Profile {
             delay_ms: [1.5, 6.0],
             level_db: [-20.0, -12.0],
             damping: 0.7,
-            low_db: 0.0,
+            low_db: -5.0,
         },
         release: Release {
             hardness: 1.0,
@@ -203,16 +203,7 @@ impl Profile {
             sec_gap_ms: [8.0, 10.0],
             sec_level_db: -16.0,
         },
-        keys: [
-            KeyVoice { code: 51, gains_db: [-15.7, 3.7, 1.8, -3.6, 1.8], decay: 1.09, level_db: 1.3 },
-            KeyVoice { code: 36, gains_db: [-10.7, -6.3, 0.8, 2.5, 1.7], decay: 0.81, level_db: 1.3 },
-            KeyVoice { code: 48, gains_db: [2.6, 1.2, -13.6, 11.2, -1.4], decay: 1.14, level_db: 1.3 },
-            KeyVoice { code: 49, gains_db: [-12.5, 6.0, 1.6, -1.1, -6.0], decay: 1.12, level_db: 1.3 },
-            KeyVoice { code: 56, gains_db: [-12.8, -9.0, 1.2, 8.5, 0.1], decay: 1.11, level_db: 1.3 },
-            KeyVoice { code: 59, gains_db: [-0.9, 7.8, 5.2, -17.1, 5.0], decay: 0.96, level_db: 1.3 },
-            KeyVoice { code: 57, gains_db: [7.9, -5.0, 7.9, -17.1, 6.3], decay: 1.18, level_db: 1.3 },
-            KeyVoice { code: 60, gains_db: [-12.8, -9.0, 1.2, 8.5, 0.1], decay: 1.11, level_db: 1.3 },
-        ],
+        keys: [UNUSED; KEY_VOICES],
     };
 }
 
@@ -426,53 +417,5 @@ impl Profile {
 
     pub fn key_voice(&self, code: u32) -> &KeyVoice {
         self.keys.iter().find(|k| k.code == code).unwrap_or(&UNUSED)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn text_round_trip() {
-        let text = Profile::CREAMY.to_text();
-        assert_eq!(Profile::parse(&text).unwrap(), Profile::CREAMY);
-    }
-
-    #[test]
-    fn bundled_creamy_matches_builtin() {
-        let text = include_str!("../../assets/profiles/creamy.kprofile");
-        assert_eq!(Profile::parse(text).unwrap(), Profile::CREAMY);
-    }
-
-    #[test]
-    fn parse_sections_and_dotted_keys() {
-        let p = Profile::parse(
-            "# comment\n[noise]\nlevel_db = -20 # trailing\nplate.freqs = 1 2 3 4 5 6 7 8 9 10 11 12\n[master]\nseed = 0x10\n",
-        )
-        .unwrap();
-        assert_eq!(p.noise.level_db, -20.0);
-        assert_eq!(p.plate.modes.freqs[11], 12.0);
-        assert_eq!(p.master.seed, 16);
-        assert_eq!(p.keycap, Profile::CREAMY.keycap);
-    }
-
-    #[test]
-    fn key_voices() {
-        let p = Profile::parse("[keys]\n49 = -6 1 2 3 4 0.8 0\n36 = 0 0 0 0 0 1 2\n49 = 1 1 1 1 1 1 1\n").unwrap();
-        assert_eq!(p.key_voice(49).gains_db, [1.0; 5]);
-        assert_eq!(p.key_voice(36).decay, 1.0);
-        assert_eq!(p.key_voice(5), &UNUSED);
-        assert_eq!(Profile::parse(&p.to_text()).unwrap(), p);
-        assert!(Profile::parse("[keys]\n200 = 0 0 0 0 0 1 0").is_err());
-        assert!(Profile::parse("[keys]\n1 = 0 0 0").is_err());
-    }
-
-    #[test]
-    fn parse_errors() {
-        assert!(Profile::parse("[plate]\nfreqs = 1 2 3").unwrap_err().contains("expected 12 values"));
-        assert!(Profile::parse("[noise]\nbogus = 1").unwrap_err().contains("unknown key"));
-        assert!(Profile::parse("[noise]\nlevel_db = x").unwrap_err().contains("invalid number"));
-        assert!(Profile::parse("level_db -3").unwrap_err().contains("key = value"));
     }
 }

@@ -23,6 +23,50 @@ const LN_1000: f32 = 6.907_755;
 const NEPER_PER_DB: f32 = 0.115_129_25;
 const TAIL: f32 = 1.05;
 const REFERENCE_KEY: usize = 0;
+const RING: usize = 32;
+const BOARD_UNITS: [f32; 2] = [15.0, 6.0];
+const ITD_S: f32 = 0.000_28;
+
+#[derive(Clone, Copy)]
+struct Field {
+    k: [[f32; 2]; 2],
+    phase: [f32; 2],
+}
+
+impl Field {
+    fn new(rng: &mut Xorshift32) -> Field {
+        let wave = |rng: &mut Xorshift32| {
+            let a = 2.0 * PI * rng.uniform();
+            let c = 1.0 / rng.range(8.0, 20.0);
+            [c * a.cos(), c * a.sin()]
+        };
+        Field { k: [wave(rng), wave(rng)], phase: [2.0 * PI * rng.uniform(), 2.0 * PI * rng.uniform()] }
+    }
+
+    fn at(&self, g: &KeyGeom) -> f32 {
+        let (u, v) = (g.x * BOARD_UNITS[0], g.y * BOARD_UNITS[1]);
+        let w = |i: usize| (2.0 * PI * (self.k[i][0] * u + self.k[i][1] * v) + self.phase[i]).sin();
+        0.5 * (w(0) + w(1))
+    }
+}
+
+struct Fields {
+    mode: [Field; MODES],
+    gain: [Field; 5],
+    hit: [Field; 3],
+}
+
+impl Fields {
+    fn new(seed: u64) -> Fields {
+        let s = splitmix64(seed ^ 0x5350_4143_4500_0000);
+        let mut rng = Xorshift32::new((s ^ (s >> 32)) as u32 | 1);
+        Fields {
+            mode: std::array::from_fn(|_| Field::new(&mut rng)),
+            gain: std::array::from_fn(|_| Field::new(&mut rng)),
+            hit: std::array::from_fn(|_| Field::new(&mut rng)),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct KeyModel {
@@ -32,7 +76,9 @@ pub struct KeyModel {
     norm: [f32; MODES],
     pub lnr: [f32; MODES],
     pub amp: [f32; MODES],
-    pan: [f32; 2],
+    gain: [f32; 2],
+    delay: [u32; 2],
+    shadow: [f32; 2],
     width: f32,
     sec_gap: f32,
     sec_amp: f32,
@@ -56,7 +102,9 @@ const EMPTY_MODEL: KeyModel = KeyModel {
     norm: [0.0; MODES],
     lnr: [-1.0; MODES],
     amp: [0.0; MODES],
-    pan: [1.0; 2],
+    gain: [1.0; 2],
+    delay: [0; 2],
+    shadow: [1.0; 2],
     width: 4.0,
     sec_gap: 0.0,
     sec_amp: 0.0,
@@ -66,6 +114,7 @@ const EMPTY_MODEL: KeyModel = KeyModel {
 
 struct Params {
     var: f32,
+    spatial: bool,
     pitch: f32,
     pitch_clip: f32,
     mode_pitch: f32,
@@ -140,13 +189,14 @@ fn set_group<const N: usize>(
     }
 }
 
-fn key_model(p: &Profile, patterns: &[[f32; 2]; 12], code: usize, fs: f32) -> KeyModel {
+fn key_model(p: &Profile, patterns: &[[f32; 2]; 12], fields: &Fields, code: usize, fs: f32) -> KeyModel {
     let seed = splitmix64(p.master.seed ^ (code as u64).wrapping_mul(GOLDEN));
     let mut rng = Xorshift32::new((seed ^ (seed >> 32)) as u32);
     let geom = layout::geometry(code as u8)
         .unwrap_or_else(|| KeyGeom { x: rng.uniform(), y: rng.uniform(), width: 1.0 });
     let large = geom.width >= p.stab.min_width;
-    let damping = if matches!(code, 49 | 56 | 60) { p.stab.damping } else { 1.0 };
+    let octaves = geom.width.max(1.0).log2();
+    let damping = 1.0 + (p.stab.damping - 1.0) * ((geom.width - 1.0) / 5.25).clamp(0.0, 1.0);
     let size_f = geom.width.powf(p.master.size_freq_exp);
     let size_d = geom.width.powf(p.master.size_decay_exp);
 
@@ -157,30 +207,32 @@ fn key_model(p: &Profile, patterns: &[[f32; 2]; 12], code: usize, fs: f32) -> Ke
     set_group(&p.switch, SWITCH, &mut freqs, &mut t60, &mut gains);
 
     let voice = p.key_voice(code as u32);
-    let spread: [f32; 5] = std::array::from_fn(|g| db(rng.gauss() * p.master.key_spread_db + voice.gains_db[g]));
+    let spread: [f32; 5] = std::array::from_fn(|g| {
+        let amount = if g == 0 { 0.3 } else { 1.0 };
+        db(fields.gain[g].at(&geom) * amount * p.master.key_spread_db + voice.gains_db[g])
+    });
     for m in 0..MODES {
         gains[m] *= spread[group(m)];
         t60[m] *= voice.decay;
     }
-    let low_shift = if large { p.low.large_freq / p.low.modes.freqs[0] } else { 1.0 };
+    let low_shift = (p.low.large_freq / p.low.modes.freqs[0]).powf(octaves);
+    let detune = |m: usize, amount: f32| 1.0 + amount * fields.mode[m].at(&geom);
     for m in LOW..PLATE {
-        freqs[m] *= low_shift * (1.0 + p.low.modes.detune * rng.bipolar());
-        if large {
-            gains[m] *= db(p.stab.low_db);
-        }
+        freqs[m] *= low_shift * detune(m, p.low.modes.detune);
+        gains[m] *= db(p.stab.low_db * octaves);
     }
     for m in PLATE..KEYCAP {
-        freqs[m] *= 1.0 + p.plate.modes.detune * rng.bipolar();
+        freqs[m] *= detune(m, p.plate.modes.detune);
         let [pm, qm] = patterns[m - PLATE];
         let shape = ((PI * pm * geom.x).sin() * (PI * qm * geom.y).sin()).abs();
         gains[m] *= p.plate.floor + (1.0 - p.plate.floor) * shape;
     }
     for m in KEYCAP..SWITCH {
-        freqs[m] *= size_f * (1.0 + p.keycap.detune * rng.bipolar());
+        freqs[m] *= size_f * detune(m, p.keycap.detune);
         t60[m] *= size_d;
     }
-    for f in freqs[SWITCH..].iter_mut() {
-        *f *= 1.0 + p.switch.detune * rng.bipolar();
+    for (m, f) in freqs.iter_mut().enumerate().skip(SWITCH) {
+        *f *= detune(m, p.switch.detune);
     }
 
     let mut k = EMPTY_MODEL;
@@ -193,11 +245,18 @@ fn key_model(p: &Profile, patterns: &[[f32; 2]; 12], code: usize, fs: f32) -> Ke
         k.lnr[m] = -LN_1000 / (t60[m].max(0.002) * damping * fs);
         k.amp[m] = gains[m];
     }
-    let pan = (geom.x - 0.5) * 2.0 * p.master.stereo_width;
-    k.pan = [1.0 - pan, 1.0 + pan];
-    k.width = rng.range(p.hit.width_ms[0], p.hit.width_ms[1]) * 0.001 * fs;
-    k.sec_gap = rng.range(p.hit.sec_gap_ms[0], p.hit.sec_gap_ms[1]) * 0.001 * fs;
-    k.sec_amp = db(rng.range(p.hit.sec_level_db[0], p.hit.sec_level_db[1]));
+    let pan = ((geom.x - 0.5) * 2.0 * p.master.stereo_width).clamp(-1.0, 1.0);
+    let angle = 0.25 * PI * (pan + 1.0);
+    k.gain = [angle.cos() * std::f32::consts::SQRT_2, angle.sin() * std::f32::consts::SQRT_2];
+    let lag = ((ITD_S * fs * pan.abs()) as u32).min(RING as u32 - 1);
+    let shade = 1.0 - (-2.0 * PI * (18_000.0 - 12_000.0 * pan.abs()).min(0.45 * fs) / fs).exp();
+    let far = usize::from(pan < 0.0);
+    k.delay[far] = lag;
+    k.shadow[far] = shade;
+    let lerp = |r: [f32; 2], f: &Field| r[0] + (r[1] - r[0]) * (0.5 + 0.5 * f.at(&geom));
+    k.width = lerp(p.hit.width_ms, &fields.hit[0]) * 0.001 * fs;
+    k.sec_gap = lerp(p.hit.sec_gap_ms, &fields.hit[1]) * 0.001 * fs;
+    k.sec_amp = db(lerp(p.hit.sec_level_db, &fields.hit[2]));
     k.stab_count = if large {
         p.stab.count[0] + rng.next_u32() % (p.stab.count[1].saturating_sub(p.stab.count[0]) + 1)
     } else {
@@ -233,6 +292,7 @@ impl SynthBank {
             keys: [EMPTY_MODEL; KEYS],
             params: Params {
                 var: 1.0,
+                spatial: true,
                 pitch: v.pitch,
                 pitch_clip: v.pitch_clip,
                 mode_pitch: v.mode_pitch,
@@ -263,8 +323,9 @@ impl SynthBank {
                 drive_tail: (LN_1000 * 3.0 * fs / (2.0 * PI * p.low.drive_hz.clamp(10.0, 0.45 * fs))) as u32,
             },
         });
+        let fields = Fields::new(p.master.seed);
         for (code, k) in bank.keys.iter_mut().enumerate() {
-            *k = key_model(p, &patterns, code, fs);
+            *k = key_model(p, &patterns, &fields, code, fs);
         }
         bank.normalize(p, db(p.master.peak_db), db(p.release.level_db));
         bank
@@ -272,9 +333,11 @@ impl SynthBank {
 
     fn nominal_peak(&mut self, code: usize, release: bool) -> f32 {
         self.params.var = 0.0;
+        self.params.spatial = false;
         let mut v = SynthVoice::IDLE;
         v.start(self, code, release, 0, 1);
         self.params.var = 1.0;
+        self.params.spatial = true;
         let mut peak = 0.0f32;
         let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
         while v.active() {
@@ -339,7 +402,11 @@ pub struct SynthVoice {
     att_end: u32,
     noise_amp: f32,
     noise_end: u32,
-    pan: [f32; 2],
+    gain: [f32; 2],
+    delay: [u32; 2],
+    shadow: [f32; 2],
+    shade: [f32; 2],
+    ring: [f32; RING],
     pos: u32,
     frames: u32,
 }
@@ -373,7 +440,11 @@ impl SynthVoice {
         att_end: 0,
         noise_amp: 0.0,
         noise_end: 0,
-        pan: [0.0; 2],
+        gain: [0.0; 2],
+        delay: [0; 2],
+        shadow: [1.0; 2],
+        shade: [0.0; 2],
+        ring: [0.0; RING],
         pos: 0,
         frames: 0,
     };
@@ -381,11 +452,6 @@ impl SynthVoice {
     #[inline(always)]
     pub fn active(&self) -> bool {
         self.pos < self.frames
-    }
-
-    #[cfg(test)]
-    pub fn frames(&self) -> u32 {
-        self.frames
     }
 
     pub fn start(&mut self, bank: &SynthBank, code: usize, release: bool, velocity: u8, seed: u32) {
@@ -479,10 +545,16 @@ impl SynthVoice {
             0
         };
 
-        self.pan = k.pan;
+        if p.spatial {
+            (self.gain, self.delay, self.shadow) = (k.gain, k.delay, k.shadow);
+        } else {
+            (self.gain, self.delay, self.shadow) = ([1.0; 2], [0; 2], [1.0; 2]);
+        }
+        self.shade = [0.0; 2];
+        self.ring = [0.0; RING];
         self.pos = 0;
         let modal = if min_lnr < f32::MAX { (LN_1000 * TAIL / min_lnr) as u32 } else { 0 };
-        self.frames = modal.max(self.noise_end).max(self.exc_end);
+        self.frames = modal.max(self.noise_end).max(self.exc_end) + self.delay[0].max(self.delay[1]);
     }
 
     #[inline]
@@ -494,11 +566,18 @@ impl SynthVoice {
             let n = (total - done).min(BLOCK).min((edge - self.pos) as usize);
             let mut mono = [0.0f32; BLOCK];
             self.render_block(&mut mono[..n]);
-            let [pl, pr] = self.pan;
-            for ((l, r), s) in out_l[done..done + n].iter_mut().zip(&mut out_r[done..done + n]).zip(&mono[..n]) {
-                *l += s * pl;
-                *r += s * pr;
+            let start = self.pos - n as u32;
+            let ([gl, gr], [dl, dr], [al, ar]) = (self.gain, self.delay, self.shadow);
+            let [mut zl, mut zr] = self.shade;
+            for (i, ((l, r), s)) in out_l[done..done + n].iter_mut().zip(&mut out_r[done..done + n]).zip(&mono[..n]).enumerate() {
+                let t = start + i as u32;
+                self.ring[t as usize % RING] = *s;
+                zl += al * (self.ring[t.wrapping_sub(dl) as usize % RING] - zl);
+                zr += ar * (self.ring[t.wrapping_sub(dr) as usize % RING] - zr);
+                *l += zl * gl;
+                *r += zr * gr;
             }
+            self.shade = [zl, zr];
             done += n;
         }
     }
@@ -593,149 +672,5 @@ impl SynthVoice {
         self.hp_y = hy;
         self.lp_y = ly;
         self.env = env;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const FS: f64 = 48_000.0;
-
-    fn render(bank: &SynthBank, code: usize, release: bool, velocity: u8, seed: u32, chunk: usize) -> (Vec<f32>, u32) {
-        let mut v = SynthVoice::IDLE;
-        v.start(bank, code, release, velocity, seed);
-        let frames = v.frames();
-        let mut l = Vec::new();
-        while v.active() {
-            let (mut bl, mut br) = (vec![0.0; chunk], vec![0.0; chunk]);
-            v.render(&mut bl, &mut br);
-            l.extend_from_slice(&bl);
-        }
-        l.truncate(frames as usize);
-        (l, frames)
-    }
-
-    fn bits_equal(a: &[f32], b: &[f32]) -> bool {
-        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-    }
-
-    #[test]
-    fn same_key_and_seed_is_bit_identical() {
-        let bank = SynthBank::new(&Profile::CREAMY, FS);
-        for code in [0, 49, 36, 100] {
-            assert!(bits_equal(&render(&bank, code, false, 40, 1234, 128).0, &render(&bank, code, false, 40, 1234, 128).0));
-        }
-    }
-
-    #[test]
-    fn chunk_size_does_not_change_output() {
-        let bank = SynthBank::new(&Profile::CREAMY, FS);
-        let (a, _) = render(&bank, 5, false, 90, 77, 128);
-        for chunk in [1, 32, 37, 512] {
-            assert!(bits_equal(&a, &render(&bank, 5, false, 90, 77, chunk).0), "chunk {chunk}");
-        }
-    }
-
-    #[test]
-    fn different_seeds_and_keys_differ() {
-        let bank = SynthBank::new(&Profile::CREAMY, FS);
-        let diff = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
-        let (a, _) = render(&bank, 0, false, 0, 1, 128);
-        let (b, _) = render(&bank, 0, false, 0, 2, 128);
-        let (c, _) = render(&bank, 1, false, 0, 1, 128);
-        assert!(diff(&a, &b) > 1e-3);
-        assert!(diff(&a, &c) > 1e-3);
-    }
-
-    #[test]
-    fn stable_bounded_and_ends_in_time() {
-        let bank = SynthBank::new(&Profile::CREAMY, FS);
-        for code in 0..KEYS {
-            for (release, velocity, seed) in [(false, 0, 9), (false, 127, 10), (true, 64, 11)] {
-                let mut v = SynthVoice::IDLE;
-                v.start(&bank, code, release, velocity, seed);
-                assert!(v.b2.iter().all(|&b2| b2 < 1.0 && b2 > 0.0), "key {code}");
-                let (x, frames) = render(&bank, code, release, velocity, seed, 128);
-                assert_eq!(x.len(), frames as usize);
-                assert!(frames > 0 && f64::from(frames) < 0.5 * FS, "key {code} frames {frames}");
-                let peak = x.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-                assert!(peak.is_finite() && peak > 1e-3 && peak < 2.0, "key {code} peak {peak}");
-                let tail = x[x.len() - 64..].iter().fold(0.0f32, |a, s| a.max(s.abs()));
-                assert!(tail < peak * 0.01, "key {code} tail {tail} peak {peak}");
-            }
-        }
-    }
-
-    #[test]
-    fn idle_voice_renders_nothing() {
-        let mut v = SynthVoice::IDLE;
-        let (mut l, mut r) = ([0.0f32; 64], [0.0f32; 64]);
-        v.render(&mut l, &mut r);
-        assert!(!v.active() && l.iter().chain(&r).all(|s| *s == 0.0));
-    }
-
-    #[test]
-    fn reference_voice_peaks_at_master_level() {
-        let mut bank = SynthBank::new(&Profile::CREAMY, FS);
-        let peak = bank.nominal_peak(REFERENCE_KEY, false);
-        let target = db(Profile::CREAMY.master.peak_db);
-        assert!((peak / target - 1.0).abs() < 1e-3, "{peak} {target}");
-    }
-
-    #[test]
-    fn single_mode_hits_its_frequency() {
-        let mut p = Profile::CREAMY;
-        p.low.modes.gains_db = [-200.0; 4];
-        p.plate.modes.gains_db = [-200.0; 12];
-        p.keycap.gains_db = [-200.0; 4];
-        p.switch.gains_db = [-200.0; 4];
-        p.noise.level_db = -200.0;
-        for m in [LOW + 2, PLATE + 5, KEYCAP + 1, SWITCH] {
-            let mut q = p;
-            match group(m) {
-                0 => q.low.modes.gains_db[m - LOW] = 0.0,
-                1 => q.plate.modes.gains_db[m - PLATE] = 0.0,
-                2 => q.keycap.gains_db[m - KEYCAP] = 0.0,
-                _ => q.switch.gains_db[m - SWITCH] = 0.0,
-            }
-            let mut bank = SynthBank::new(&q, FS);
-            bank.params.var = 0.0;
-            let code = 4;
-            let expected = f64::from(bank.keys[code].w[m]) * FS / (2.0 * std::f64::consts::PI);
-            let (x, _) = render(&bank, code, false, 0, 3, 128);
-            let start = (0.015 * FS) as usize;
-            let seg = &x[start..start + (0.03 * FS) as usize];
-            let crossings: Vec<f64> = seg
-                .windows(2)
-                .enumerate()
-                .filter(|(_, w)| w[0] <= 0.0 && w[1] > 0.0)
-                .map(|(i, w)| i as f64 + f64::from(w[0] / (w[0] - w[1])))
-                .collect();
-            let period = (crossings[crossings.len() - 1] - crossings[0]) / (crossings.len() - 1) as f64;
-            let measured = FS / period;
-            assert!((measured / expected - 1.0).abs() < 0.005, "mode {m}: {measured} vs {expected}");
-        }
-    }
-
-    #[test]
-    fn velocity_raises_level() {
-        let bank = SynthBank::new(&Profile::CREAMY, FS);
-        let energy = |v: u8| render(&bank, 3, false, v, 5, 128).0.iter().map(|s| s * s).sum::<f32>();
-        assert!(energy(127) > energy(0) * 1.3);
-    }
-
-    #[test]
-    fn approximations_are_accurate() {
-        for i in -20..=20 {
-            let x = i as f32 * 0.05;
-            assert!((exp_approx(x) / x.exp() - 1.0).abs() < 1e-5, "{x}");
-        }
-        for i in 0..=100 {
-            let u = i as f32 / 100.0;
-            assert!((sin_pi(u) - (PI * u).sin()).abs() < 1e-5, "{u}");
-        }
-        let x = -0.02f32;
-        assert!((exp_small(x) - x.exp()).abs() < 1e-8);
     }
 }

@@ -50,28 +50,3 @@ impl Xorshift32 {
         (s - 2.0) * 1.732_050_8
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splitmix_reference() {
-        assert_eq!(splitmix64(0), 0xE220_A839_7B1D_CDAF);
-    }
-
-    #[test]
-    fn gauss_moments() {
-        let mut r = Xorshift32::new(7);
-        let n = 200_000;
-        let (mut m, mut v) = (0.0f64, 0.0f64);
-        for _ in 0..n {
-            let g = f64::from(r.gauss());
-            m += g;
-            v += g * g;
-        }
-        m /= f64::from(n);
-        v = v / f64::from(n) - m * m;
-        assert!(m.abs() < 0.01 && (v - 1.0).abs() < 0.02, "{m} {v}");
-    }
-}

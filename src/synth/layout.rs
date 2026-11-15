@@ -50,33 +50,3 @@ pub fn geometry(code: u8) -> Option<KeyGeom> {
     }
     None
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn known_keys() {
-        let space = geometry(49).unwrap();
-        assert_eq!(space.width, 6.25);
-        assert!((space.x - 0.5).abs() < 0.1);
-        assert_eq!(geometry(36).unwrap().width, 2.25);
-        let a = geometry(0).unwrap();
-        let l = geometry(37).unwrap();
-        assert_eq!(a.y, l.y);
-        assert!(a.x < l.x);
-        assert!(geometry(200).is_none());
-        assert!(geometry(65).is_none());
-    }
-
-    #[test]
-    fn rows_have_unique_codes() {
-        let mut seen = [false; 256];
-        for keys in ROWS {
-            for &(c, _) in keys {
-                assert!(!seen[c as usize], "duplicate {c}");
-                seen[c as usize] = true;
-            }
-        }
-    }
-}

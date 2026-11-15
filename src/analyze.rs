@@ -157,7 +157,9 @@ fn mean_peak(ms: &[Measured]) -> f64 {
 
 pub fn synth_sound(profile: &Profile, rate: f64, key: i32, ty: SoundType, seed: u64) -> Vec<f32> {
     let ev = [Event { t_ms: 0.0, key, ty }];
-    let (l, r) = cli::render_synth(profile, rate, &ev, 400.0, seed);
+    let mut centered = *profile;
+    centered.master.stereo_width = 0.0;
+    let (l, r) = cli::render_synth(&centered, rate, &ev, 400.0, seed);
     l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)).collect()
 }
 
