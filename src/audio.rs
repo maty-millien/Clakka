@@ -8,20 +8,24 @@ use crate::synth::rng::splitmix64;
 use crate::synth::{SynthBank, SynthVoice, VOICES};
 
 pub const MAX_VOICES: usize = 16;
-const BUFFER_FRAMES: u32 = 128;
+const BUFFER_FRAMES: u32 = 32;
+const MAX_FRAMES_PER_SLICE: u32 = 4096;
+const DEFAULT_SAMPLE_RATE: f64 = 48_000.0;
+const SINC_ZEROS: usize = 32;
+const MAX_SINC_PHASES: usize = 4096;
+const KAISER_BETA: f64 = 9.0;
 const QUEUE_CAPACITY: usize = 64;
 const KEY_TABLE: usize = 128;
-const SYNTH_MAX_FRAMES: u32 = 4096;
-pub(crate) const SYNTH_BIT: u64 = 1 << 63;
+const SYNTH_BIT: u64 = 1 << 63;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode {
+enum Mode {
     Wav,
     Synth,
 }
 
 #[inline(always)]
-pub(crate) fn synth_word(key_code: i32, ty: SoundType, velocity: u8, seed: u32) -> u64 {
+fn synth_word(key_code: i32, ty: SoundType, velocity: u8, seed: u32) -> u64 {
     SYNTH_BIT
         | u64::from(seed) << 16
         | u64::from(velocity & 0x7F) << 9
@@ -44,14 +48,14 @@ impl SoundType {
     }
 }
 
-pub(crate) struct Sound {
+struct Sound {
     data: Box<[f32]>,
     frames: usize,
     right_offset: usize,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Voice {
+struct Voice {
     left: *const f32,
     right: *const f32,
     frames: usize,
@@ -60,21 +64,19 @@ pub(crate) struct Voice {
 
 const IDLE: Voice = Voice { left: ptr::null(), right: ptr::null(), frames: 0, pos: 0 };
 
-pub(crate) struct RenderState {
-    pub(crate) voices: [Voice; MAX_VOICES],
+struct RenderState {
+    voices: [Voice; MAX_VOICES],
     next_voice: usize,
     synth_voices: [SynthVoice; VOICES],
     next_synth: usize,
-    rt_scheduled: bool,
     fp_ready: bool,
-    sample_rate: f64,
 }
 
 #[repr(align(128))]
-pub(crate) struct Padded<T>(pub(crate) T);
+struct Padded<T>(T);
 
-pub(crate) struct TriggerQueue {
-    pub(crate) slots: [AtomicU64; QUEUE_CAPACITY],
+struct TriggerQueue {
+    slots: [AtomicU64; QUEUE_CAPACITY],
     head: Padded<Cell<usize>>,
     tail: Padded<Cell<usize>>,
 }
@@ -93,7 +95,7 @@ impl TriggerQueue {
     }
 
     #[inline]
-    pub(crate) fn drain(&self, mut f: impl FnMut(u64)) {
+    fn drain(&self, mut f: impl FnMut(u64)) {
         let mut tail = self.tail.0.get();
         loop {
             let slot = &self.slots[tail % QUEUE_CAPACITY];
@@ -110,15 +112,15 @@ impl TriggerQueue {
     }
 }
 
-pub(crate) struct Engine {
-    pub(crate) queue: TriggerQueue,
-    pub(crate) render: UnsafeCell<RenderState>,
-    pub(crate) synth: Option<Box<SynthBank>>,
+struct Engine {
+    queue: TriggerQueue,
+    render: UnsafeCell<RenderState>,
+    synth: Option<Box<SynthBank>>,
 }
 
 pub struct Audio {
-    pub(crate) audio_unit: AudioUnit,
-    pub(crate) engine: NonNull<Engine>,
+    audio_unit: AudioUnit,
+    engine: NonNull<Engine>,
     #[allow(clippy::vec_box)]
     sounds: Vec<Box<Sound>>,
     explicit: [[*const Sound; KEY_TABLE]; 2],
@@ -126,7 +128,10 @@ pub struct Audio {
     fallback: [Vec<*const Sound>; 2],
     next_fallback: [Cell<usize>; 2],
     sample_rate: f64,
+    buffer_frames: u32,
+    device_frames: u32,
     initialized: bool,
+    latency_log: bool,
     timebase: MachTimebaseInfo,
     mode: Mode,
     velocity: Velocity,
@@ -175,9 +180,7 @@ impl Audio {
                 next_voice: 0,
                 synth_voices: [SynthVoice::IDLE; VOICES],
                 next_synth: 0,
-                rt_scheduled: false,
                 fp_ready: false,
-                sample_rate: 0.0,
             }),
             synth: None,
         });
@@ -192,7 +195,10 @@ impl Audio {
             fallback: [Vec::new(), Vec::new()],
             next_fallback: [Cell::new(0), Cell::new(0)],
             sample_rate: 0.0,
+            buffer_frames: 0,
+            device_frames: 0,
             initialized: false,
+            latency_log: std::env::var_os("KREAM_LATENCY_LOG").is_some_and(|v| v == "1"),
             velocity: Velocity {
                 ms_per_tick: (timebase.numer as f64 / timebase.denom as f64 / 1e6) as f32,
                 window_ms: 250.0,
@@ -219,23 +225,13 @@ impl Audio {
         v.range_ms = profile.velocity.range_ms.max(1.0);
         v.smoothing = profile.velocity.smoothing.clamp(0.0, 1.0);
         self.sample_rate = rate;
-        unsafe {
-            let engine = &mut *self.engine.as_ptr();
-            (*engine.render.get()).sample_rate = rate;
-            engine.synth = Some(bank);
-        }
+        unsafe { (*self.engine.as_ptr()).synth = Some(bank) };
         fence(Ordering::Release);
         self.mode = Mode::Synth;
     }
 
     pub fn start_synth(&mut self, profile: &Profile) -> bool {
-        if self.initialized {
-            return false;
-        }
-        let Some(device) = default_output_device() else { return false };
-        let rate = device_sample_rate(device).unwrap_or(48_000.0);
-        self.prepare_synth(profile, rate);
-        self.open_unit(device, rate, true)
+        !self.initialized && self.init_audio_unit(Some(profile))
     }
 
     pub fn open_offline(&mut self, profile: &Profile, rate: f64) {
@@ -269,8 +265,24 @@ impl Audio {
         }
     }
 
+    #[inline(always)]
+    pub fn play_at(&self, key_code: i32, ty: SoundType, now: u64) -> bool {
+        if ty == SoundType::Press {
+            self.velocity.press(now);
+        }
+        let seed = self.velocity.seed(now);
+        self.trigger(key_code, ty, self.velocity.value.get(), seed)
+    }
+
+    pub fn ms_to_ticks(&self, ms: f64) -> u64 {
+        (ms * 1e6 * self.timebase.denom as f64 / self.timebase.numer as f64) as u64
+    }
+
     pub fn load_key_sound(&mut self, key_code: i32, ty: SoundType, path: &str) -> bool {
-        let Some((sound, rate)) = load_wav(path) else {
+        if !self.initialized && !self.init_audio_unit(None) {
+            return false;
+        }
+        let Some(sound) = self.load_sound(path) else {
             eprintln!("Error: Unable to load key sound {path}");
             return false;
         };
@@ -283,17 +295,25 @@ impl Audio {
                 None => self.explicit_other[t].push((key_code, p)),
             },
         }
-        self.initialized || self.init_audio_unit(rate)
+        true
     }
 
     pub fn load_fallback_sound(&mut self, ty: SoundType, path: &str) -> bool {
-        let Some((sound, rate)) = load_wav(path) else {
+        if !self.initialized && !self.init_audio_unit(None) {
+            return false;
+        }
+        let Some(sound) = self.load_sound(path) else {
             eprintln!("Error: Unable to load fallback sound {path}");
             return false;
         };
         let p = self.keep(sound);
         self.fallback[ty as usize].push(p);
-        self.initialized || self.init_audio_unit(rate)
+        true
+    }
+
+    fn load_sound(&self, path: &str) -> Option<Sound> {
+        let (sound, rate) = load_wav(path)?;
+        Some(if rate.round() == self.sample_rate.round() { sound } else { resample(&sound, rate, self.sample_rate) })
     }
 
     fn keep(&mut self, sound: Sound) -> *const Sound {
@@ -314,25 +334,12 @@ impl Audio {
         }
     }
 
-    #[inline(always)]
-    pub fn play_at(&self, key_code: i32, ty: SoundType, now: u64) -> bool {
-        if ty == SoundType::Press {
-            self.velocity.press(now);
-        }
-        let seed = self.velocity.seed(now);
-        self.trigger(key_code, ty, self.velocity.value.get(), seed)
-    }
-
-    pub fn ms_to_ticks(&self, ms: f64) -> u64 {
-        (ms * 1e6 * self.timebase.denom as f64 / self.timebase.numer as f64) as u64
-    }
-
     #[inline]
     pub fn play(&self, key_code: i32, ty: SoundType, event_time: u64) {
         if self.mode == Mode::Synth {
             let now = if event_time != 0 { event_time } else { unsafe { mach_absolute_time() } };
             self.play_at(key_code, ty, now);
-            if event_time != 0 {
+            if self.latency_log && event_time != 0 {
                 self.log_latency(key_code, ty, event_time);
             }
             return;
@@ -350,7 +357,7 @@ impl Audio {
         }
         unsafe { self.engine.as_ref() }.queue.push(sound as u64);
 
-        if event_time != 0 {
+        if self.latency_log && event_time != 0 {
             self.log_latency(key_code, ty, event_time);
         }
     }
@@ -361,17 +368,23 @@ impl Audio {
         let latency_us = now.wrapping_sub(event_time) as f64 * self.timebase.numer as f64
             / self.timebase.denom as f64
             / 1000.0;
-        let buffer_ms = (128.0 / self.sample_rate) * 1000.0;
-        let mut buf = [0u8; 160];
+        let buffer_ms = self.buffer_frames as f64 * 1000.0 / self.sample_rate;
+        let device_ms = self.device_frames as f64 * 1000.0 / self.sample_rate;
+        let mut buf = [0u8; 200];
         let n = unsafe {
             snprintf(
                 buf.as_mut_ptr().cast(),
                 buf.len(),
-                c"[Latency] key=%d type=%s software=%g\xc2\xb5s +buffer\xe2\x89\x88%gms\n".as_ptr(),
+                c"[Latency] key=%d type=%s software=%g\xc2\xb5s +buffer\xe2\x89\x88%g-%gms +device\xe2\x89\x88%gms (%u frames @ %g Hz)\n"
+                    .as_ptr(),
                 key_code as c_int,
                 ty.name().as_ptr().cast::<c_char>(),
                 latency_us,
                 buffer_ms,
+                2.0 * buffer_ms,
+                device_ms,
+                self.buffer_frames,
+                self.sample_rate,
             )
         };
         if n > 0 {
@@ -380,17 +393,7 @@ impl Audio {
         }
     }
 
-    fn init_audio_unit(&mut self, file_sample_rate: f64) -> bool {
-        if self.mode == Mode::Synth {
-            return false;
-        }
-        self.sample_rate = file_sample_rate;
-        unsafe { (*self.engine.as_ref().render.get()).sample_rate = file_sample_rate };
-        let Some(device_id) = default_output_device() else { return false };
-        self.open_unit(device_id, file_sample_rate, false)
-    }
-
-    fn open_unit(&mut self, device_id: u32, sample_rate: f64, synth: bool) -> bool {
+    fn init_audio_unit(&mut self, synth: Option<&Profile>) -> bool {
         unsafe {
             let desc = AudioComponentDescription {
                 component_type: fourcc(b"auou"),
@@ -411,33 +414,43 @@ impl Audio {
                 return false;
             }
 
-            self.set_property(AU_CURRENT_DEVICE, SCOPE_GLOBAL, 0, &device_id);
+            let device_id = match object_property::<u32>(AUDIO_SYSTEM_OBJECT, b"dOut", SCOPE_GLOBAL_OBJECT) {
+                Ok(id) => id,
+                Err(status) => {
+                    eprintln!("Error: Failed to get default audio output device (OSStatus {status})");
+                    AudioComponentInstanceDispose(self.audio_unit);
+                    self.audio_unit = ptr::null_mut();
+                    return false;
+                }
+            };
 
-            let addr = AudioObjectPropertyAddress {
-                selector: fourcc(b"fsiz"),
-                scope: SCOPE_GLOBAL_OBJECT,
-                element: 0,
-            };
-            AudioObjectSetPropertyData(
-                device_id,
-                &addr,
-                0,
-                ptr::null(),
-                size_of::<u32>() as u32,
-                (&BUFFER_FRAMES as *const u32).cast(),
-            );
-            let max_frames = if synth {
-                get_property::<u32>(device_id, fourcc(b"fsiz")).unwrap_or(BUFFER_FRAMES).max(SYNTH_MAX_FRAMES)
-            } else {
-                BUFFER_FRAMES
-            };
-            self.set_property(AU_MAX_FRAMES_PER_SLICE, SCOPE_GLOBAL, 0, &max_frames);
+            self.set_property(AU_CURRENT_DEVICE, SCOPE_GLOBAL, 0, &device_id);
+            self.sample_rate = object_property::<f64>(device_id, b"nsrt", SCOPE_GLOBAL_OBJECT)
+                .ok()
+                .filter(|r| *r > 0.0)
+                .unwrap_or(DEFAULT_SAMPLE_RATE);
+            if let Some(profile) = synth {
+                self.prepare_synth(profile, self.sample_rate);
+            }
+
+            let [min, max] = object_property::<[f64; 2]>(device_id, b"fsz#", SCOPE_GLOBAL_OBJECT)
+                .unwrap_or([BUFFER_FRAMES as f64; 2]);
+            let requested = (BUFFER_FRAMES as f64).clamp(min, max.max(min)) as u32;
+            set_object_property(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT, &requested);
+            self.buffer_frames = object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT).unwrap_or(requested);
+            self.set_property(AU_MAX_FRAMES_PER_SLICE, SCOPE_GLOBAL, 0, &self.buffer_frames.max(MAX_FRAMES_PER_SLICE));
+            let stream_latency = object_property::<u32>(device_id, b"stm#", SCOPE_OUTPUT_OBJECT)
+                .and_then(|stream| object_property::<u32>(stream, b"ltnc", SCOPE_GLOBAL_OBJECT))
+                .unwrap_or(0);
+            self.device_frames = object_property::<u32>(device_id, b"ltnc", SCOPE_OUTPUT_OBJECT).unwrap_or(0)
+                + object_property::<u32>(device_id, b"saft", SCOPE_OUTPUT_OBJECT).unwrap_or(0)
+                + stream_latency;
 
             self.set_property(AU_ENABLE_IO, SCOPE_INPUT, 1, &0u32);
             self.set_property(AU_ENABLE_IO, SCOPE_OUTPUT, 0, &1u32);
 
             let format = AudioStreamBasicDescription {
-                sample_rate,
+                sample_rate: self.sample_rate,
                 format_id: fourcc(b"lpcm"),
                 format_flags: 9 | 32,
                 bytes_per_packet: 4,
@@ -471,7 +484,13 @@ impl Audio {
                 self.audio_unit = ptr::null_mut();
                 return false;
             }
+            self.buffer_frames =
+                object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT).unwrap_or(self.buffer_frames);
         }
+        println!(
+            "Audio output: {} Hz, {}-frame buffer, {} frames of device latency",
+            self.sample_rate, self.buffer_frames, self.device_frames
+        );
         self.initialized = true;
         true
     }
@@ -501,28 +520,8 @@ impl Drop for Audio {
     }
 }
 
-unsafe fn get_property<T: Copy + Default>(object: u32, selector: u32) -> Option<T> {
-    let addr = AudioObjectPropertyAddress { selector, scope: SCOPE_GLOBAL_OBJECT, element: 0 };
-    let mut value = T::default();
-    let mut size = size_of::<T>() as u32;
-    let status = AudioObjectGetPropertyData(object, &addr, 0, ptr::null(), &mut size, (&raw mut value).cast());
-    (status == 0 && size as usize == size_of::<T>()).then_some(value)
-}
-
-fn default_output_device() -> Option<u32> {
-    let device = unsafe { get_property::<u32>(AUDIO_SYSTEM_OBJECT, fourcc(b"dOut")) };
-    if device.is_none() {
-        eprintln!("Error: Failed to get default audio output device");
-    }
-    device
-}
-
-fn device_sample_rate(device: u32) -> Option<f64> {
-    unsafe { get_property::<f64>(device, fourcc(b"nsrt")) }.filter(|r| *r >= 8000.0)
-}
-
 #[inline]
-pub(crate) fn enable_flush_to_zero() {
+fn enable_flush_to_zero() {
     #[cfg(target_arch = "aarch64")]
     unsafe {
         let fpcr: u64;
@@ -538,17 +537,7 @@ pub(crate) fn enable_flush_to_zero() {
     }
 }
 
-fn setup_realtime_thread(buffer_frames: u32, sample_rate: f64) {
-    let period = ((buffer_frames as f64 / sample_rate) * 1e9) as u32;
-    let computation = period / 2;
-    let policy = [period, computation, period, 0];
-    unsafe {
-        let thread = pthread_mach_thread_np(pthread_self());
-        thread_policy_set(thread, THREAD_TIME_CONSTRAINT_POLICY, policy.as_ptr(), 4);
-    }
-}
-
-pub(crate) unsafe extern "C" fn render_callback(
+unsafe extern "C" fn render_callback(
     ref_con: *mut c_void,
     _flags: *mut u32,
     _time: *const c_void,
@@ -562,10 +551,6 @@ pub(crate) unsafe extern "C" fn render_callback(
     if !st.fp_ready {
         enable_flush_to_zero();
         st.fp_ready = true;
-    }
-    if !st.rt_scheduled {
-        setup_realtime_thread(frames, st.sample_rate);
-        st.rt_scheduled = true;
     }
 
     let synth = engine.synth.as_deref();
@@ -598,7 +583,9 @@ pub(crate) unsafe extern "C" fn render_callback(
         return 0;
     }
     let bufs = (&raw mut (*io).buffers).cast::<AudioBuffer>();
-    let n = frames as usize;
+    let n = (frames as usize)
+        .min((*bufs).data_byte_size as usize / 4)
+        .min((*bufs.add(1)).data_byte_size as usize / 4);
     let out_l = std::slice::from_raw_parts_mut((*bufs).data.cast::<f32>(), n);
     let out_r = std::slice::from_raw_parts_mut((*bufs.add(1)).data.cast::<f32>(), n);
     mix(st, out_l, out_r);
@@ -673,7 +660,7 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
     let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
     let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
 
-    let mut fmt: Option<(u16, usize, u32, usize)> = None;
+    let mut fmt: Option<(u16, usize, u32, usize, usize)> = None;
     let mut data: Option<&[u8]> = None;
     let mut i = 12;
     while i + 8 <= b.len() {
@@ -687,7 +674,13 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
                 if tag == 0xFFFE && end - body >= 26 {
                     tag = u16_at(body + 24);
                 }
-                fmt = Some((tag, u16_at(body + 2) as usize, u32_at(body + 4), u16_at(body + 14) as usize));
+                fmt = Some((
+                    tag,
+                    u16_at(body + 2) as usize,
+                    u32_at(body + 4),
+                    u16_at(body + 12) as usize,
+                    u16_at(body + 14) as usize,
+                ));
             }
             b"data" => data = Some(&b[body..end]),
             _ => {}
@@ -695,12 +688,19 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
         i = body.saturating_add(size).saturating_add(size & 1);
     }
 
-    let (tag, channels, rate, bits) = fmt?;
+    let (tag, channels, rate, block_align, bits) = fmt?;
     let data = data?;
-    if channels == 0 || bits == 0 || bits % 8 != 0 {
+    if channels == 0 || rate == 0 || bits == 0 {
         return None;
     }
-    let bps = bits / 8;
+    let bps = if block_align != 0 && block_align % channels == 0 {
+        block_align / channels
+    } else {
+        bits.div_ceil(8)
+    };
+    if bits > bps * 8 {
+        return None;
+    }
     let frame_bytes = bps * channels;
     let frames = data.len() / frame_bytes;
     if frames == 0 {
@@ -738,7 +738,95 @@ fn planar<const B: usize>(data: &[u8], channels: usize, convert: impl Fn([u8; B]
     out
 }
 
-pub(crate) type AudioUnit = *mut c_void;
+fn resample(sound: &Sound, from: f64, to: f64) -> Sound {
+    let (from, to) = (from.round() as usize, to.round() as usize);
+    let g = gcd(from, to);
+    let (step, phases) = (from / g, to / g);
+    let table_phases = phases.min(MAX_SINC_PHASES);
+    let cutoff = 0.95 * (to as f64 / from as f64).min(1.0);
+    let half = (SINC_ZEROS as f64 / cutoff).ceil() as usize;
+    let taps = 2 * half;
+    let table: Vec<f32> = (0..table_phases)
+        .flat_map(|p| {
+            let frac = p as f64 / table_phases as f64;
+            (0..taps).map(move |i| sinc_kernel(frac + half as f64 - 1.0 - i as f64, cutoff))
+        })
+        .collect();
+
+    let frames = (sound.frames * to).div_ceil(from).max(1);
+    let stereo = sound.right_offset != 0;
+    let mut out = vec![0.0f32; if stereo { frames * 2 } else { frames }].into_boxed_slice();
+    let pad = |ch: &[f32]| [&vec![0.0; half][..], ch, &vec![0.0; half + 1][..]].concat();
+    let left = pad(&sound.data[..sound.frames]);
+    let right = pad(&sound.data[sound.right_offset..][..sound.frames]);
+    for j in 0..frames {
+        let r = j * step % phases;
+        let q = if table_phases == phases { r } else { (r * table_phases + phases / 2) / phases };
+        let (base, p) = (j * step / phases + q / table_phases, q % table_phases);
+        let w = &table[p * taps..][..taps];
+        out[j] = dot(&left[base + 1..][..taps], w);
+        if stereo {
+            out[frames + j] = dot(&right[base + 1..][..taps], w);
+        }
+    }
+    Sound { data: out, frames, right_offset: if stereo { frames } else { 0 } }
+}
+
+#[inline(always)]
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    let ((ac, ar), (bc, br)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    let tail: f32 = ar.iter().zip(br).map(|(x, y)| x * y).sum();
+    for (x, y) in ac.iter().zip(bc) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    acc.iter().sum::<f32>() + tail
+}
+
+fn sinc_kernel(distance: f64, cutoff: f64) -> f32 {
+    let x = distance.abs() * cutoff;
+    if x >= SINC_ZEROS as f64 {
+        return 0.0;
+    }
+    let u = x / SINC_ZEROS as f64;
+    let px = std::f64::consts::PI * x;
+    let sinc = if x < 1e-9 { 1.0 } else { px.sin() / px };
+    (cutoff * sinc * bessel_i0(KAISER_BETA * (1.0 - u * u).sqrt()) / bessel_i0(KAISER_BETA)) as f32
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+fn bessel_i0(x: f64) -> f64 {
+    let (mut sum, mut term, mut k) = (1.0, 1.0, 1.0);
+    while term > sum * 1e-12 {
+        term *= (x / (2.0 * k)) * (x / (2.0 * k));
+        sum += term;
+        k += 1.0;
+    }
+    sum
+}
+
+unsafe fn object_property<T>(object: u32, selector: &[u8; 4], scope: u32) -> Result<T, i32> {
+    let addr = AudioObjectPropertyAddress { selector: fourcc(selector), scope, element: 0 };
+    let mut value = std::mem::MaybeUninit::<T>::zeroed();
+    let mut size = size_of::<T>() as u32;
+    match AudioObjectGetPropertyData(object, &addr, 0, ptr::null(), &mut size, value.as_mut_ptr().cast()) {
+        0 if size as usize == size_of::<T>() => Ok(value.assume_init()),
+        0 => Err(-1),
+        status => Err(status),
+    }
+}
+
+unsafe fn set_object_property<T>(object: u32, selector: &[u8; 4], scope: u32, value: &T) -> i32 {
+    let addr = AudioObjectPropertyAddress { selector: fourcc(selector), scope, element: 0 };
+    AudioObjectSetPropertyData(object, &addr, 0, ptr::null(), size_of::<T>() as u32, (value as *const T).cast())
+}
+
+type AudioUnit = *mut c_void;
 type AudioComponent = *mut c_void;
 
 const fn fourcc(c: &[u8; 4]) -> u32 {
@@ -747,6 +835,7 @@ const fn fourcc(c: &[u8; 4]) -> u32 {
 
 const AUDIO_SYSTEM_OBJECT: u32 = 1;
 const SCOPE_GLOBAL_OBJECT: u32 = fourcc(b"glob");
+const SCOPE_OUTPUT_OBJECT: u32 = fourcc(b"outp");
 const SCOPE_GLOBAL: u32 = 0;
 const SCOPE_INPUT: u32 = 1;
 const SCOPE_OUTPUT: u32 = 2;
@@ -755,7 +844,6 @@ const AU_MAX_FRAMES_PER_SLICE: u32 = 14;
 const AU_SET_RENDER_CALLBACK: u32 = 23;
 const AU_CURRENT_DEVICE: u32 = 2000;
 const AU_ENABLE_IO: u32 = 2003;
-const THREAD_TIME_CONSTRAINT_POLICY: u32 = 2;
 
 #[repr(C)]
 struct AudioComponentDescription {
@@ -796,16 +884,16 @@ struct AURenderCallbackStruct {
 }
 
 #[repr(C)]
-pub(crate) struct AudioBuffer {
-    pub(crate) number_channels: u32,
-    pub(crate) data_byte_size: u32,
-    pub(crate) data: *mut c_void,
+struct AudioBuffer {
+    number_channels: u32,
+    data_byte_size: u32,
+    data: *mut c_void,
 }
 
 #[repr(C)]
-pub(crate) struct AudioBufferList {
-    pub(crate) number_buffers: u32,
-    pub(crate) buffers: [AudioBuffer; 1],
+struct AudioBufferList {
+    number_buffers: u32,
+    buffers: [AudioBuffer; 1],
 }
 
 #[repr(C)]
@@ -829,7 +917,7 @@ extern "C" {
     fn AudioUnitInitialize(unit: AudioUnit) -> i32;
     fn AudioUnitUninitialize(unit: AudioUnit) -> i32;
     fn AudioOutputUnitStart(unit: AudioUnit) -> i32;
-    pub(crate) fn AudioOutputUnitStop(unit: AudioUnit) -> i32;
+    fn AudioOutputUnitStop(unit: AudioUnit) -> i32;
 }
 
 #[link(name = "CoreAudio", kind = "framework")]
@@ -855,9 +943,6 @@ extern "C" {
 extern "C" {
     fn mach_absolute_time() -> u64;
     fn mach_timebase_info(info: *mut MachTimebaseInfo) -> c_int;
-    fn pthread_self() -> usize;
-    fn pthread_mach_thread_np(thread: usize) -> u32;
-    fn thread_policy_set(thread: u32, flavor: u32, info: *const u32, count: u32) -> c_int;
     fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
     fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
 }
@@ -865,6 +950,104 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wav(tag: u16, channels: u16, block_align: u16, bits: u16, extensible: Option<u16>, data: &[u8]) -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend(extensible.map_or(tag, |_| 0xFFFE).to_le_bytes());
+        fmt.extend(channels.to_le_bytes());
+        fmt.extend(48_000u32.to_le_bytes());
+        fmt.extend((48_000 * u32::from(block_align)).to_le_bytes());
+        fmt.extend(block_align.to_le_bytes());
+        fmt.extend(bits.to_le_bytes());
+        if let Some(valid) = extensible {
+            fmt.extend(22u16.to_le_bytes());
+            fmt.extend(valid.to_le_bytes());
+            fmt.extend(3u32.to_le_bytes());
+            fmt.extend(tag.to_le_bytes());
+            fmt.extend([0u8; 14]);
+        }
+        let mut b = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        b.extend((fmt.len() as u32).to_le_bytes());
+        b.extend(fmt);
+        b.extend(b"data");
+        b.extend((data.len() as u32).to_le_bytes());
+        b.extend(data);
+        b
+    }
+
+    fn samples(s: &Sound) -> (Vec<f32>, Vec<f32>) {
+        (s.data[..s.frames].to_vec(), s.data[s.right_offset..s.right_offset + s.frames].to_vec())
+    }
+
+    #[test]
+    fn decodes_16_bit_stereo() {
+        let data: Vec<u8> = [16384i16, -32768, -16384, 32767].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (s, rate) = decode_wav(&wav(1, 2, 4, 16, None, &data)).unwrap();
+        assert_eq!(rate, 48_000.0);
+        assert_eq!(samples(&s), (vec![0.5, -0.5], vec![-1.0, 32767.0 / 32768.0]));
+    }
+
+    #[test]
+    fn decodes_24_bit_in_32_bit_container() {
+        let data: Vec<u8> = [0x40_0000i32 << 8, -0x40_0000 << 8].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (s, _) = decode_wav(&wav(1, 2, 8, 24, None, &data)).unwrap();
+        assert_eq!(samples(&s), (vec![0.5], vec![-0.5]));
+        let (s, _) = decode_wav(&wav(1, 2, 8, 32, Some(24), &data)).unwrap();
+        assert_eq!(samples(&s), (vec![0.5], vec![-0.5]));
+    }
+
+    #[test]
+    fn decodes_12_and_20_bit() {
+        let data: Vec<u8> = [0x400i16 << 4, -0x400 << 4].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (s, _) = decode_wav(&wav(1, 1, 2, 12, None, &data)).unwrap();
+        assert_eq!(samples(&s).0, vec![0.5, -0.5]);
+        let data = [0x00, 0x00, 0x40, 0x00, 0x00, 0xC0];
+        let (s, _) = decode_wav(&wav(1, 1, 3, 20, None, &data)).unwrap();
+        assert_eq!(samples(&s).0, vec![0.5, -0.5]);
+    }
+
+    #[test]
+    fn decodes_float() {
+        let data: Vec<u8> = [0.25f32, -0.75].iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (s, _) = decode_wav(&wav(3, 1, 4, 32, None, &data)).unwrap();
+        assert_eq!(samples(&s).0, vec![0.25, -0.75]);
+    }
+
+    fn tone(freq: f64, rate: f64, frames: usize) -> Sound {
+        let ch: Vec<f32> = (0..frames).map(|i| (std::f64::consts::TAU * freq * i as f64 / rate).sin() as f32).collect();
+        Sound { data: [ch.clone(), ch].concat().into_boxed_slice(), frames, right_offset: frames }
+    }
+
+    fn tone_error(from: f64, to: f64) -> f64 {
+        let out = resample(&tone(1000.0, from, from as usize), from, to);
+        assert_eq!(out.frames, to as usize);
+        let (l, r) = samples(&out);
+        assert_eq!(l, r);
+        (1000..out.frames - 1000)
+            .map(|i| (l[i] as f64 - (std::f64::consts::TAU * 1000.0 * i as f64 / to).sin()).abs())
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn resamples_tone_without_distortion() {
+        let err = tone_error(44_100.0, 48_000.0);
+        assert!(err < 1e-4, "max error {err}");
+        let err = tone_error(44_100.0, 47_999.0);
+        assert!(err < 1e-4, "max error {err}");
+    }
+
+    #[test]
+    fn downsampling_removes_content_above_nyquist() {
+        let out = resample(&tone(30_000.0, 96_000.0, 96_000), 96_000.0, 48_000.0);
+        assert_eq!(out.frames, 48_000);
+        let peak = samples(&out).0[1000..47_000].iter().fold(0.0f32, |a, x| a.max(x.abs()));
+        assert!(peak < 1e-4, "alias peak {peak}");
+    }
+
+    #[test]
+    fn rejects_bits_larger_than_container() {
+        assert!(decode_wav(&wav(1, 1, 2, 24, None, &[0; 4])).is_none());
+    }
 
     #[test]
     fn synth_word_packs_fields() {
