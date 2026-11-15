@@ -18,6 +18,8 @@ pub const KEYCAP: usize = 16;
 pub const SWITCH: usize = 20;
 const MAX_PULSES: usize = 6;
 const MAX_SHAPE: usize = 128;
+const MAX_CLICK: usize = 32;
+const CLICK_OFF_DB: f32 = -100.0;
 const BLOCK: usize = 128;
 const LN_1000: f32 = 6.907_755;
 const NEPER_PER_DB: f32 = 0.115_129_25;
@@ -26,6 +28,7 @@ const REFERENCE_KEY: usize = 0;
 const RING: usize = 32;
 const BOARD_UNITS: [f32; 2] = [15.0, 6.0];
 const ITD_S: f32 = 0.000_17;
+const ITD_MAX_HZ: f32 = 1500.0;
 const LOUDNESS_TARGET: f64 = 1e-4;
 const REFERENCE_PEAK: f32 = 0.5;
 const HEADROOM: f32 = 0.75;
@@ -86,6 +89,7 @@ pub struct KeyModel {
     delay: [u32; 2],
     shadow: [f32; 2],
     width: f32,
+    click_width: f32,
     sec_gap: f32,
     sec_amp: f32,
     stab_count: u32,
@@ -112,6 +116,7 @@ const EMPTY_MODEL: KeyModel = KeyModel {
     delay: [0; 2],
     shadow: [1.0; 2],
     width: 4.0,
+    click_width: 3.0,
     sec_gap: 0.0,
     sec_amp: 0.0,
     stab_count: 0,
@@ -143,6 +148,14 @@ struct Params {
     rel_sec_chance: f32,
     rel_sec_gap: [f32; 2],
     rel_sec_amp: f32,
+    click_on: bool,
+    itd_split: f32,
+    click_amp: f32,
+    click_delay: [f32; 2],
+    click_rel_delay: [f32; 2],
+    click_rel_amp: f32,
+    click_double: [f32; 2],
+    click_double_amp: f32,
     noise_hp: f32,
     noise_lp: f32,
     noise_attack: f32,
@@ -277,6 +290,7 @@ fn key_model(
     k.shadow[far] = shade;
     let lerp = |r: [f32; 2], f: &Field| r[0] + (r[1] - r[0]) * (0.5 + 0.5 * f.at(&geom));
     k.width = lerp(p.hit.width_ms, &fields.hit[0]) * 0.001 * fs;
+    k.click_width = lerp(p.click.width_ms, &fields.hit[0]) * 0.001 * fs;
     k.sec_gap = lerp(p.hit.sec_gap_ms, &fields.hit[1]) * 0.001 * fs;
     k.sec_amp = db(lerp(p.hit.sec_level_db, &fields.hit[2]));
     k.stab_count = if large {
@@ -344,6 +358,17 @@ impl SynthBank {
                 rel_sec_chance: r.sec_chance,
                 rel_sec_gap: [r.sec_gap_ms[0] * ms, r.sec_gap_ms[1] * ms],
                 rel_sec_amp: db(r.sec_level_db),
+                click_on: p.click.level_db > CLICK_OFF_DB,
+                itd_split: 1.0 - (-2.0 * PI * ITD_MAX_HZ / fs).exp(),
+                click_amp: db(p.click.level_db),
+                click_delay: [p.click.delay_ms[0] * ms, p.click.delay_ms[1] * ms],
+                click_rel_delay: [
+                    p.click.release_delay_ms[0] * ms,
+                    p.click.release_delay_ms[1] * ms,
+                ],
+                click_rel_amp: db(p.click.release_db),
+                click_double: [p.click.double_ms[0] * ms, p.click.double_ms[1] * ms],
+                click_double_amp: db(p.click.double_db),
                 noise_hp: 1.0 / (1.0 + 2.0 * PI * p.noise.hp_hz / fs),
                 noise_lp: 1.0 - (-2.0 * PI * p.noise.lp_hz.min(0.45 * fs) / fs).exp(),
                 noise_attack: (p.noise.attack_ms * ms).max(1.0),
@@ -465,6 +490,13 @@ pub struct SynthVoice {
     shape: [f32; MAX_SHAPE],
     shape_len: u32,
     x_hist: [f32; 2],
+    gc: [f32; MODES],
+    click_shape: [f32; MAX_CLICK],
+    click_len: u32,
+    click_at: [u32; 2],
+    click_amp: [f32; 2],
+    clicks: u32,
+    c_hist: [f32; 2],
     drive: f32,
     drive_state: [f32; 3],
     pulse_at: [u32; MAX_PULSES],
@@ -487,6 +519,8 @@ pub struct SynthVoice {
     delay: [u32; 2],
     shadow: [f32; 2],
     shade: [f32; 2],
+    split: f32,
+    low: f32,
     ring: [f32; RING],
     pos: u32,
     frames: u32,
@@ -503,6 +537,13 @@ impl SynthVoice {
         shape: [0.0; MAX_SHAPE],
         shape_len: 0,
         x_hist: [0.0; 2],
+        gc: [0.0; MODES],
+        click_shape: [0.0; MAX_CLICK],
+        click_len: 0,
+        click_at: [0; 2],
+        click_amp: [0.0; 2],
+        clicks: 0,
+        c_hist: [0.0; 2],
         drive: 0.0,
         drive_state: [0.0; 3],
         pulse_at: [0; MAX_PULSES],
@@ -525,6 +566,8 @@ impl SynthVoice {
         delay: [0; 2],
         shadow: [1.0; 2],
         shade: [0.0; 2],
+        split: 0.0,
+        low: 0.0,
         ring: [0.0; RING],
         pos: 0,
         frames: 0,
@@ -563,7 +606,11 @@ impl SynthVoice {
                 a *= p.rel_gain[m];
             }
             let a = a * k.norm[m];
-            (self.gl[m], self.gh[m]) = if m < PLATE { (a, 0.0) } else { (0.0, a) };
+            (self.gl[m], self.gh[m], self.gc[m]) = match m {
+                _ if m < PLATE => (a, 0.0, 0.0),
+                _ if m >= SWITCH && p.click_on => (0.0, 0.0, a),
+                _ => (0.0, a, 0.0),
+            };
             self.y1[m] = 0.0;
             self.y2[m] = 0.0;
             if a != 0.0 {
@@ -602,7 +649,46 @@ impl SynthVoice {
             n += 1;
         }
         self.pulses = n as u32;
-        self.exc_end = self.pulse_at[..n].iter().max().copied().unwrap_or(0) + len as u32 + 2;
+        self.clicks = 0;
+        self.c_hist = [0.0; 2];
+        let mut click_end = 0;
+        if p.click_on {
+            let delay = if release {
+                rng.range(p.click_rel_delay[0], p.click_rel_delay[1])
+            } else {
+                rng.range(p.click_delay[0], p.click_delay[1]) * (1.0 - vel * p.vel_gap)
+            };
+            let offset = delay.max(0.0) as u32;
+            for at in self.pulse_at[..n].iter_mut() {
+                *at += offset;
+            }
+            let amp = p.click_amp
+                * if release { p.click_rel_amp } else { 1.0 }
+                * exp_approx(rng.gauss() * p.mode_gain * var);
+            let double = rng.range(p.click_double[0], p.click_double[1]) as u32;
+            self.click_at = [0, double];
+            self.click_amp = [
+                amp,
+                amp * p.click_double_amp * exp_approx(rng.gauss() * p.mode_gain * var),
+            ];
+            self.clicks = 2;
+            let w = k.click_width.clamp(2.0, MAX_CLICK as f32);
+            let clen = (w.ceil() as usize).min(MAX_CLICK);
+            let mut area = 0.0;
+            for (j, v) in self.click_shape[..clen].iter_mut().enumerate() {
+                let u = (j as f32 + 0.5) / w;
+                let s = if u < 1.0 { sin_pi(u) } else { 0.0 };
+                *v = s * s;
+                area += *v;
+            }
+            for v in self.click_shape[..clen].iter_mut() {
+                *v /= area;
+            }
+            self.click_len = clen as u32;
+            click_end = double + clen as u32 + 2;
+        }
+        self.exc_end =
+            (self.pulse_at[..n].iter().max().copied().unwrap_or(0) + len as u32 + 2).max(click_end);
         self.x_hist = [0.0; 2];
         self.exc_end += p.drive_tail;
         self.drive = p.drive;
@@ -632,6 +718,8 @@ impl SynthVoice {
             (self.gain, self.delay, self.shadow) = ([1.0; 2], [0; 2], [1.0; 2]);
         }
         self.shade = [0.0; 2];
+        self.split = p.itd_split;
+        self.low = 0.0;
         self.ring = [0.0; RING];
         self.pos = 0;
         let modal = if min_lnr < f32::MAX {
@@ -666,9 +754,11 @@ impl SynthVoice {
                 .enumerate()
             {
                 let t = start + i as u32;
-                self.ring[t as usize % RING] = *s;
-                zl += al * (self.ring[t.wrapping_sub(dl) as usize % RING] - zl);
-                zr += ar * (self.ring[t.wrapping_sub(dr) as usize % RING] - zr);
+                self.low += self.split * (*s - self.low);
+                let high = *s - self.low;
+                self.ring[t as usize % RING] = self.low;
+                zl += al * (self.ring[t.wrapping_sub(dl) as usize % RING] + high - zl);
+                zr += ar * (self.ring[t.wrapping_sub(dr) as usize % RING] + high - zr);
                 *l += zl * gl;
                 *r += zr * gr;
             }
@@ -712,9 +802,32 @@ impl SynthVoice {
                 lo[i] = z[2];
             }
             self.drive_state = z;
-            self.resonate::<true>(&lo, &d, out);
+            let mut dc = [0.0f32; BLOCK];
+            if self.clicks > 0 {
+                let mut c = [0.0f32; BLOCK + 2];
+                c[0] = self.c_hist[0];
+                c[1] = self.c_hist[1];
+                let len = self.click_len;
+                for k in 0..self.clicks as usize {
+                    let s = self.click_at[k];
+                    if s >= pos + n as u32 || s + len <= pos {
+                        continue;
+                    }
+                    let a = self.click_amp[k];
+                    let j0 = pos.saturating_sub(s);
+                    let j1 = (pos + n as u32 - s).min(len);
+                    for j in j0..j1 {
+                        c[(s + j - pos) as usize + 2] += a * self.click_shape[j as usize];
+                    }
+                }
+                self.c_hist = [c[n], c[n + 1]];
+                for i in 0..n {
+                    dc[i] = c[i + 2] - 2.0 * c[i + 1] + c[i];
+                }
+            }
+            self.resonate::<true>(&lo, &d, &dc, out);
         } else {
-            self.resonate::<false>(&[], &[], out);
+            self.resonate::<false>(&[], &[], &[], out);
         }
         if pos < self.noise_end {
             self.noise(out);
@@ -723,8 +836,14 @@ impl SynthVoice {
     }
 
     #[inline(always)]
-    fn resonate<const EXCITE: bool>(&mut self, lo: &[f32], hi: &[f32], out: &mut [f32]) {
-        let (b1, b2, gl, gh) = (self.b1, self.b2, self.gl, self.gh);
+    fn resonate<const EXCITE: bool>(
+        &mut self,
+        lo: &[f32],
+        hi: &[f32],
+        click: &[f32],
+        out: &mut [f32],
+    ) {
+        let (b1, b2, gl, gh, gc) = (self.b1, self.b2, self.gl, self.gh, self.gc);
         let (mut y1, mut y2) = (self.y1, self.y2);
         for (i, o) in out.iter_mut().enumerate() {
             let mut y = [0.0f32; MODES];
@@ -732,9 +851,9 @@ impl SynthVoice {
                 y[m] = b1[m] * y1[m] - b2[m] * y2[m];
             }
             if EXCITE {
-                let (xl, xh) = (lo[i], hi[i]);
+                let (xl, xh, xc) = (lo[i], hi[i], click[i]);
                 for m in 0..MODES {
-                    y[m] += gl[m] * xl + gh[m] * xh;
+                    y[m] += gl[m] * xl + gh[m] * xh + gc[m] * xc;
                 }
             }
             y2 = y1;

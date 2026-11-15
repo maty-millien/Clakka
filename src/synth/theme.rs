@@ -36,6 +36,17 @@ pub struct Hit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Click {
+    pub level_db: f32,
+    pub width_ms: [f32; 2],
+    pub delay_ms: [f32; 2],
+    pub release_delay_ms: [f32; 2],
+    pub release_db: f32,
+    pub double_ms: [f32; 2],
+    pub double_db: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Variation {
     pub pitch: f32,
     pub pitch_clip: f32,
@@ -117,6 +128,7 @@ pub struct Theme {
     pub switch: Group<4>,
     pub noise: Noise,
     pub hit: Hit,
+    pub click: Click,
     pub variation: Variation,
     pub velocity: Velocity,
     pub stab: Stab,
@@ -182,6 +194,15 @@ impl Theme {
             width_ms: [0.4, 0.7],
             sec_gap_ms: [6.0, 13.0],
             sec_level_db: [-20.0, -14.0],
+        },
+        click: Click {
+            level_db: -200.0,
+            width_ms: [0.08, 0.14],
+            delay_ms: [5.0, 9.0],
+            release_delay_ms: [2.0, 4.0],
+            release_db: -3.0,
+            double_ms: [0.5, 1.2],
+            double_db: -9.0,
         },
         variation: Variation {
             pitch: 0.003,
@@ -310,6 +331,14 @@ fn visit(p: &mut Theme, f: &mut dyn FnMut(&'static str, &'static str, &mut dyn F
     f("hit", "width_ms", &mut h.width_ms);
     f("hit", "sec_gap_ms", &mut h.sec_gap_ms);
     f("hit", "sec_level_db", &mut h.sec_level_db);
+    let c = &mut p.click;
+    f("click", "level_db", &mut c.level_db);
+    f("click", "width_ms", &mut c.width_ms);
+    f("click", "delay_ms", &mut c.delay_ms);
+    f("click", "release_delay_ms", &mut c.release_delay_ms);
+    f("click", "release_db", &mut c.release_db);
+    f("click", "double_ms", &mut c.double_ms);
+    f("click", "double_db", &mut c.double_db);
     let v = &mut p.variation;
     f("variation", "pitch", &mut v.pitch);
     f("variation", "pitch_clip", &mut v.pitch_clip);
