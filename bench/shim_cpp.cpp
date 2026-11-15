@@ -1,6 +1,3 @@
-// Bench shim for the original C++ sources (built from `git archive main src lib`).
-// System and standard headers first, then expose private members of the engine
-// classes to this translation unit only.
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <atomic>
@@ -65,9 +62,6 @@ extern "C" int kb_input_start(void) {
     }
 }
 
-// play() stores position = 0 last (relaxed) into voice nextVoiceIndex % MAX_VOICES.
-// With the output unit stopped nothing else writes positions, so position == 0 on
-// the expected voice means the seq-th play() is visible to the audio thread.
 extern "C" int kb_poll_published(uint64_t seq) {
     return g_audio->voices[seq % MAX_VOICES].position.load(std::memory_order_acquire) == 0;
 }

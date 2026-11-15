@@ -1,18 +1,13 @@
-# Cargo build output
 target/
 
-# Benchmark build output and results (bench/run.py)
 bench/out/
 
-# Old CMake build directory
 build/
 
-# Editors and OS
 .vscode/
 *.swp
 *~
 .DS_Store
 
-# Logs and temporary files
 *.log
 *.tmp

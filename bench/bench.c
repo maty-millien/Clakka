@@ -1,17 +1,3 @@
-// Benchmark driver shared by both engine versions. It is linked once against the
-// C++ shim and once against the Rust shim (see run.py); nothing in here depends on
-// which one it is.
-//
-// Usage: bench <mode> [args]
-//   startup             time Theme::loadThemes (WAV decode + AudioUnit init/start)
-//   play                Audio::play() cost, explicit and fallback keys
-//   callback <logfile>  event tap callback with synthetic CGEvents (no tap involved)
-//   render              render callback per 128-frame buffer with 0/1/8/16 voices
-//   golden <outfile>    deterministic play/render script, raw float output for diffing
-//   tap <logfile> <n>   CGEventPost -> real event tap -> play() published (needs Accessibility)
-//
-// Every result line: "<name> n=<count> p50=<ns> p99=<ns> max=<ns> mean=<ns>".
-
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <mach/mach_time.h>
@@ -50,18 +36,15 @@ static void report(const char *name, double *v, size_t n) {
 static void setup(void) {
     kb_init();
     kb_load_themes();
-    // Let the real IO thread run a few callbacks (it takes the one-time RT policy setup),
-    // then stop it so the benchmark thread is the only caller of the render callback.
     usleep(200 * 1000);
     kb_stop_audio_unit();
 }
 
-// Keys with an explicit sound in the Creamy theme, and plain keys that use the fallback round-robin.
 static const int kExplicit[] = {49, 36, 48, 51, 56, 59};
 static const int kFallback[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12};
 #define LEN(a) (sizeof(a) / sizeof((a)[0]))
 
-static uint64_t g_seq; // number of play() calls so far, mirrors the engine's voice counter
+static uint64_t g_seq;
 
 static void mode_startup(void) {
     kb_init();
@@ -119,7 +102,6 @@ static CGEventRef make_flags(int key, CGEventFlags flags) {
     return e;
 }
 
-// Parse "software=<us>" values from the engine's own [Latency] log lines.
 static void report_logged(const char *name, const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return;
@@ -142,9 +124,9 @@ static void mode_callback(const char *logpath) {
     if (!freopen(logpath, "w", stderr)) return;
     enum { N = 30000 };
     CGEventRef events[6] = {
-        make_key(49, true), make_key(49, false),           // space: explicit
-        make_key(0, true),  make_key(0, false),            // 'a': fallback round-robin
-        make_flags(56, kCGEventFlagMaskShift), make_flags(56, 0), // left shift press/release
+        make_key(49, true), make_key(49, false),
+        make_key(0, true),  make_key(0, false),
+        make_flags(56, kCGEventFlagMaskShift), make_flags(56, 0),
     };
     CGEventType types[6] = {kCGEventKeyDown, kCGEventKeyUp, kCGEventKeyDown,
                             kCGEventKeyUp,   kCGEventFlagsChanged, kCGEventFlagsChanged};
@@ -172,8 +154,6 @@ static void mode_render(void) {
         size_t n = 0;
         for (int rep = 0; rep < REPS; ++rep) {
             for (int k = 0; k < counts[c]; ++k) kb_play(kFallback[k % LEN(kFallback)], 0, 0);
-            // A 1 s sound is 345 buffers long: all voices stay active for the TIMED buffers
-            // and are finished before the next repetition starts.
             for (int b = 0; b < TOTAL; ++b) {
                 uint64_t t0 = mach_absolute_time();
                 kb_render(FRAMES, left, right);
@@ -188,8 +168,6 @@ static void mode_render(void) {
     free(v);
 }
 
-// Deterministic script: overlapping voices (more than MAX_VOICES), explicit and
-// fallback keys, odd buffer sizes like the ones the HAL converter requests, clipping.
 static void mode_golden(const char *outpath) {
     setup();
     FILE *out = fopen(outpath, "wb");
@@ -210,17 +188,13 @@ static void mode_golden(const char *outpath) {
     printf("golden written\n");
 }
 
-// --- tap mode -------------------------------------------------------------
-
-#define TAG 0x4b5245414d42ULL // "KREAMB", set in kCGEventSourceUserData of synthetic events
+#define TAG 0x4b5245414d42ULL
 
 static CFMachPortRef g_tail_tap;
 static volatile long g_dropped;
 static CFRunLoopRef g_main_loop;
 static long g_tap_n;
 
-// Tail tap: runs after the engine's head tap and swallows our synthetic events so
-// they never reach the focused application.
 static CGEventRef tail_cb(CGEventTapProxy proxy, CGEventType type, CGEventRef e, void *info) {
     (void)proxy, (void)info;
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
@@ -241,7 +215,6 @@ static void *poster(void *arg) {
     size_t ok = 0, missed = 0;
     usleep(300 * 1000);
     for (long i = 0; i < n; ++i) {
-        // F19 (keycode 80): no explicit sound, goes through the fallback path; harmless if leaked.
         CGEventRef e = CGEventCreateKeyboardEvent(NULL, 80, (i & 1) == 0);
         CGEventSetFlags(e, 0);
         CGEventSetIntegerValueField(e, kCGEventSourceUserData, (int64_t)TAG);

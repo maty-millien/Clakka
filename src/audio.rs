@@ -1,36 +1,11 @@
-//! CoreAudio HAL output unit, sound bank and real-time mixer.
-//!
-//! Threading: `play()` runs on the event tap thread, the render callback on the
-//! CoreAudio IO thread. They share only a ring of single-word mailboxes
-//! (`AtomicPtr<Sound>`, null = empty): `play()` stores a sound pointer, the audio
-//! thread takes it and starts a voice. All voice state (buffer, length, position)
-//! lives on the audio thread, so a voice can never be seen half-written and the
-//! audio thread never writes back over a voice that `play()` just started.
-//!
-//! Memory ordering: a play publishes nothing but the pointer itself, in one atomic
-//! word, so the store can be Relaxed (a plain `str`, no barrier on the tap thread).
-//! The pointee (decoded samples) is made visible by fence-to-fence synchronization:
-//! every load ends with `fence(Release)`, sequenced before any later `play()` store
-//! because `Audio` is !Send/!Sync (loads and plays happen on the same thread); the
-//! audio thread issues `fence(Acquire)` after reading a non-null pointer and before
-//! touching the samples.
-//!
-//! The render callback does no allocation, locking, syscalls or printing (apart from
-//! the one-time real-time policy call on its first invocation, as before).
-
 use std::cell::{Cell, UnsafeCell};
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{fence, AtomicPtr, Ordering};
 
 pub const MAX_VOICES: usize = 16;
-/// Requested device buffer size (~2.9 ms at 44.1 kHz).
 const BUFFER_FRAMES: u32 = 128;
-/// Pending plays between two render callbacks. Only the last MAX_VOICES of a burst
-/// can be audible anyway; this leaves room for 64 key events per buffer.
 const QUEUE_CAPACITY: usize = 64;
-/// Explicit sounds for key codes below this live in a flat table; macOS virtual
-/// key codes are 0..=127.
 const KEY_TABLE: usize = 128;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,14 +23,12 @@ impl SoundType {
     }
 }
 
-/// Decoded sound, planar: left channel then right channel (mono shares one channel).
 pub(crate) struct Sound {
     data: Box<[f32]>,
     frames: usize,
     right_offset: usize,
 }
 
-/// Audio-thread view of a playing sound. `left` is null when the voice is idle.
 #[derive(Clone, Copy)]
 pub(crate) struct Voice {
     left: *const f32,
@@ -66,8 +39,6 @@ pub(crate) struct Voice {
 
 const IDLE: Voice = Voice { left: ptr::null(), right: ptr::null(), frames: 0, pos: 0 };
 
-/// State owned by the audio thread (written by the main thread only before the
-/// output unit starts).
 pub(crate) struct RenderState {
     pub(crate) voices: [Voice; MAX_VOICES],
     next_voice: usize,
@@ -75,34 +46,28 @@ pub(crate) struct RenderState {
     sample_rate: f64,
 }
 
-/// Keeps producer and consumer state on separate cache lines (128 bytes on Apple silicon).
 #[repr(align(128))]
 pub(crate) struct Padded<T>(pub(crate) T);
 
 pub(crate) struct TriggerQueue {
-    /// Mailboxes, used round-robin by both sides. Null means empty.
     pub(crate) slots: [AtomicPtr<Sound>; QUEUE_CAPACITY],
-    /// Next slot to fill. Touched by the producer (tap thread) only.
     head: Padded<Cell<usize>>,
-    /// Next slot to take. Touched by the consumer (audio thread) only.
     tail: Padded<Cell<usize>>,
 }
 
 impl TriggerQueue {
-    /// Producer side. Returns false (and drops the play) if the queue is full.
     #[inline]
     fn push(&self, sound: *const Sound) -> bool {
         let head = self.head.0.get();
         let slot = &self.slots[head % QUEUE_CAPACITY];
         if !slot.load(Ordering::Relaxed).is_null() {
-            return false; // the audio thread has not taken this one yet: full
+            return false;
         }
         slot.store(sound.cast_mut(), Ordering::Relaxed);
         self.head.0.set(head.wrapping_add(1));
         true
     }
 
-    /// Consumer side: hands every pending sound to `f`, oldest first.
     #[inline]
     pub(crate) fn drain(&self, mut f: impl FnMut(&Sound)) {
         let mut tail = self.tail.0.get();
@@ -113,9 +78,7 @@ impl TriggerQueue {
                 break;
             }
             slot.store(ptr::null_mut(), Ordering::Relaxed);
-            // Pairs with the fence(Release) after each load: the samples are visible.
             fence(Ordering::Acquire);
-            // SAFETY: sounds outlive the output unit (see Audio::drop).
             f(unsafe { &*sound });
             tail = tail.wrapping_add(1);
         }
@@ -123,7 +86,6 @@ impl TriggerQueue {
     }
 }
 
-/// Everything the render callback touches; its address is the callback refcon.
 pub(crate) struct Engine {
     pub(crate) queue: TriggerQueue,
     pub(crate) render: UnsafeCell<RenderState>,
@@ -132,8 +94,6 @@ pub(crate) struct Engine {
 pub struct Audio {
     pub(crate) audio_unit: AudioUnit,
     pub(crate) engine: NonNull<Engine>,
-    /// Owns every decoded sound until after the output unit is disposed. Boxed so the
-    /// `*const Sound` handed to the audio thread stays valid when the Vec grows.
     #[allow(clippy::vec_box)]
     sounds: Vec<Box<Sound>>,
     explicit: [[*const Sound; KEY_TABLE]; 2],
@@ -207,7 +167,6 @@ impl Audio {
         let b = Box::new(sound);
         let p: *const Sound = &*b;
         self.sounds.push(b);
-        // Publishes the decoded samples to the audio thread (see module docs).
         fence(Ordering::Release);
         p
     }
@@ -222,7 +181,6 @@ impl Audio {
         }
     }
 
-    /// Hands a sound to the audio thread. `event_time` (mach ticks) enables the latency log.
     #[inline]
     pub fn play(&self, key_code: i32, ty: SoundType, event_time: u64) {
         let t = ty as usize;
@@ -232,15 +190,12 @@ impl Audio {
             if fallback.is_empty() {
                 return;
             }
-            // Simple round-robin through fallback sounds
             let idx = self.next_fallback[t].get() % fallback.len();
             self.next_fallback[t].set((idx + 1) % fallback.len());
             sound = fallback[idx];
         }
-        // SAFETY: the engine outlives self; Audio is !Sync so this is the only producer.
         unsafe { self.engine.as_ref() }.queue.push(sound);
 
-        // Log latency from key event to voice hand-off
         if event_time != 0 {
             self.log_latency(key_code, ty, event_time);
         }
@@ -252,10 +207,7 @@ impl Audio {
         let latency_us = now.wrapping_sub(event_time) as f64 * self.timebase.numer as f64
             / self.timebase.denom as f64
             / 1000.0;
-        // Buffer latency adds ~128 frames / sampleRate seconds (~2.9ms at 44.1kHz)
         let buffer_ms = (128.0 / self.sample_rate) * 1000.0;
-        // Same text as the C++ iostream output (%g = default stream precision), built
-        // on the stack and written with a single write(2).
         let mut buf = [0u8; 160];
         let n = unsafe {
             snprintf(
@@ -276,14 +228,12 @@ impl Audio {
 
     fn init_audio_unit(&mut self, file_sample_rate: f64) -> bool {
         self.sample_rate = file_sample_rate;
-        // SAFETY: the output unit is not running (not initialized yet), so the
-        // audio thread is not reading the render state.
         unsafe { (*self.engine.as_ref().render.get()).sample_rate = file_sample_rate };
         unsafe {
             let desc = AudioComponentDescription {
-                component_type: fourcc(b"auou"),       // kAudioUnitType_Output
-                component_sub_type: fourcc(b"ahal"),   // kAudioUnitSubType_HALOutput
-                component_manufacturer: fourcc(b"appl"), // kAudioUnitManufacturer_Apple
+                component_type: fourcc(b"auou"),
+                component_sub_type: fourcc(b"ahal"),
+                component_manufacturer: fourcc(b"appl"),
                 component_flags: 0,
                 component_flags_mask: 0,
             };
@@ -302,7 +252,7 @@ impl Audio {
             let mut device_id: u32 = 0;
             let mut size = size_of::<u32>() as u32;
             let mut addr = AudioObjectPropertyAddress {
-                selector: fourcc(b"dOut"), // kAudioHardwarePropertyDefaultOutputDevice
+                selector: fourcc(b"dOut"),
                 scope: SCOPE_GLOBAL_OBJECT,
                 element: 0,
             };
@@ -323,8 +273,7 @@ impl Audio {
 
             self.set_property(AU_CURRENT_DEVICE, SCOPE_GLOBAL, 0, &device_id);
 
-            // 128 frames (~2.9ms at 44.1kHz) per device buffer.
-            addr.selector = fourcc(b"fsiz"); // kAudioDevicePropertyBufferFrameSize
+            addr.selector = fourcc(b"fsiz");
             addr.scope = SCOPE_GLOBAL_OBJECT;
             AudioObjectSetPropertyData(
                 device_id,
@@ -342,7 +291,6 @@ impl Audio {
             let format = AudioStreamBasicDescription {
                 sample_rate: file_sample_rate,
                 format_id: fourcc(b"lpcm"),
-                // kAudioFormatFlagsNativeFloatPacked | kAudioFormatFlagIsNonInterleaved
                 format_flags: 9 | 32,
                 bytes_per_packet: 4,
                 frames_per_packet: 1,
@@ -400,13 +348,11 @@ impl Drop for Audio {
                 AudioUnitUninitialize(self.audio_unit);
                 AudioComponentInstanceDispose(self.audio_unit);
             }
-            // The render callback can no longer run: free the engine, then the sounds.
             drop(Box::from_raw(self.engine.as_ptr()));
         }
     }
 }
 
-/// Applies a time-constraint policy to the calling (audio) thread.
 fn setup_realtime_thread(buffer_frames: u32, sample_rate: f64) {
     let period = ((buffer_frames as f64 / sample_rate) * 1e9) as u32;
     let computation = period / 2;
@@ -426,11 +372,8 @@ pub(crate) unsafe extern "C" fn render_callback(
     io: *mut AudioBufferList,
 ) -> i32 {
     let engine = &*(ref_con as *const Engine);
-    // SAFETY: only this callback touches the render state once the unit runs.
     let st = &mut *engine.render.get();
 
-    // Configure real-time scheduling on the first callback: thread_policy_set applies
-    // to the calling thread, so it has to happen here.
     if !st.rt_scheduled {
         setup_realtime_thread(frames, st.sample_rate);
         st.rt_scheduled = true;
@@ -458,8 +401,6 @@ pub(crate) unsafe extern "C" fn render_callback(
     0
 }
 
-/// Sums every active voice into the outputs and clips to [-1, 1]. Plain loops over
-/// contiguous planar data: LLVM vectorizes them (NEON on Apple silicon).
 #[inline(always)]
 fn mix(voices: &mut [Voice; MAX_VOICES], out_l: &mut [f32], out_r: &mut [f32]) {
     out_l.fill(0.0);
@@ -471,7 +412,6 @@ fn mix(voices: &mut [Voice; MAX_VOICES], out_l: &mut [f32], out_r: &mut [f32]) {
         }
         active = true;
         let n = out_l.len().min(v.frames - v.pos);
-        // SAFETY: pos + n <= frames, and both channels hold `frames` samples.
         let (src_l, src_r) = unsafe {
             (
                 std::slice::from_raw_parts(v.left.add(v.pos), n),
@@ -485,7 +425,6 @@ fn mix(voices: &mut [Voice; MAX_VOICES], out_l: &mut [f32], out_r: &mut [f32]) {
             *v = IDLE;
         }
     }
-    // Silence needs no clipping.
     if active {
         clip(out_l);
         clip(out_r);
@@ -506,12 +445,6 @@ fn clip(out: &mut [f32]) {
     }
 }
 
-// --- WAV decoding -----------------------------------------------------------
-//
-// Minimal RIFF/WAVE reader covering what dr_wav decodes for uncompressed files:
-// integer PCM 8/16/24/32-bit, float 32/64-bit, plain or WAVE_FORMAT_EXTENSIBLE.
-// Sample conversion uses dr_wav's exact formulas so the decoded floats are identical.
-
 fn load_wav(path: &str) -> Option<(Sound, f64)> {
     let bytes = std::fs::read(path).ok()?;
     decode_wav(&bytes)
@@ -524,7 +457,7 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
     let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
     let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
 
-    let mut fmt: Option<(u16, usize, u32, usize)> = None; // (tag, channels, rate, bits)
+    let mut fmt: Option<(u16, usize, u32, usize)> = None;
     let mut data: Option<&[u8]> = None;
     let mut i = 12;
     while i + 8 <= b.len() {
@@ -536,7 +469,7 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
             b"fmt " if end - body >= 16 => {
                 let mut tag = u16_at(body);
                 if tag == 0xFFFE && end - body >= 26 {
-                    tag = u16_at(body + 24); // first two bytes of the SubFormat GUID
+                    tag = u16_at(body + 24);
                 }
                 fmt = Some((tag, u16_at(body + 2) as usize, u32_at(body + 4), u16_at(body + 14) as usize));
             }
@@ -559,7 +492,7 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
     }
     let data = &data[..frames * frame_bytes];
     let out = match (tag, bps) {
-        (1, 1) => planar::<1>(data, channels, |s| s[0] as f32 * (2.0 / 255.0) - 1.0), // 0..255 -> -1..1
+        (1, 1) => planar::<1>(data, channels, |s| s[0] as f32 * (2.0 / 255.0) - 1.0),
         (1, 2) => planar::<2>(data, channels, |s| i16::from_le_bytes(s) as f32 * (1.0 / 32768.0)),
         (1, 3) => planar::<3>(data, channels, |s| {
             let x = (u32::from(s[0]) << 8 | u32::from(s[1]) << 16 | u32::from(s[2]) << 24) as i32 >> 8;
@@ -574,8 +507,6 @@ fn decode_wav(b: &[u8]) -> Option<(Sound, f64)> {
     Some((Sound { data: out, frames, right_offset }, rate as f64))
 }
 
-/// Interleaved samples of `B` bytes -> planar [left..., right...] (left only for mono).
-/// Generic over the converter so it inlines into the loop.
 fn planar<const B: usize>(data: &[u8], channels: usize, convert: impl Fn([u8; B]) -> f32) -> Box<[f32]> {
     let frames = data.len() / (B * channels);
     let stereo = channels >= 2;
@@ -590,8 +521,6 @@ fn planar<const B: usize>(data: &[u8], channels: usize, convert: impl Fn([u8; B]
     }
     out
 }
-
-// --- FFI ----------------------------------------------------------------------
 
 pub(crate) type AudioUnit = *mut c_void;
 type AudioComponent = *mut c_void;
@@ -657,7 +586,6 @@ pub(crate) struct AudioBuffer {
     pub(crate) data: *mut c_void,
 }
 
-/// Variable-length in C: `buffers` has `number_buffers` entries.
 #[repr(C)]
 pub(crate) struct AudioBufferList {
     pub(crate) number_buffers: u32,

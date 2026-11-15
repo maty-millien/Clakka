@@ -1,4 +1,3 @@
-//! Implements bench/shim.h for the Rust engine.
 #![allow(dead_code, clippy::missing_safety_doc)]
 
 #[path = "../../../src/audio.rs"]
@@ -29,7 +28,6 @@ pub unsafe extern "C" fn kb_init() {
 #[no_mangle]
 pub unsafe extern "C" fn kb_load_themes() {
     theme::load_themes(audio(), "assets/themes");
-    // Input borrows Audio for the rest of the process, like in main.rs.
     INPUT = Box::into_raw(Box::new(Input::new(&*AUDIO)));
 }
 
@@ -86,14 +84,12 @@ pub unsafe extern "C" fn kb_input_start() -> i32 {
     }
 }
 
-/// The seq-th play() is visible to the audio thread once its mailbox is non-null.
 #[no_mangle]
 pub unsafe extern "C" fn kb_poll_published(seq: u64) -> i32 {
     let slots = &(*AUDIO).engine.as_ref().queue.slots;
     !slots[seq as usize % slots.len()].load(Ordering::Relaxed).is_null() as i32
 }
 
-/// Consume pending plays as the (stopped) audio thread would.
 #[no_mangle]
 pub unsafe extern "C" fn kb_ack(_seq: u64) {
     (*AUDIO).engine.as_ref().queue.drain(|_| {});

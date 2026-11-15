@@ -1,22 +1,18 @@
-//! CGEventTap on KeyDown/KeyUp/FlagsChanged, turned into press/release sounds.
-
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr;
 
 use crate::audio::{Audio, SoundType};
 
-/// Modifier key masks with standard press/release behavior (Shift, Control, Alt, Cmd, Fn).
 const MODIFIER_MASKS: [u64; 5] = [
-    0x0002_0000, // kCGEventFlagMaskShift
-    0x0004_0000, // kCGEventFlagMaskControl
-    0x0008_0000, // kCGEventFlagMaskAlternate
-    0x0010_0000, // kCGEventFlagMaskCommand
-    0x0080_0000, // kCGEventFlagMaskSecondaryFn
+    0x0002_0000,
+    0x0004_0000,
+    0x0008_0000,
+    0x0010_0000,
+    0x0080_0000,
 ];
-const FLAG_ALPHA_SHIFT: u64 = 0x0001_0000; // kCGEventFlagMaskAlphaShift (Caps Lock)
+const FLAG_ALPHA_SHIFT: u64 = 0x0001_0000;
 
-/// Delay between the simulated Caps Lock press and release sounds.
 const CAPS_RELEASE_DELAY_S: f64 = 0.1;
 
 pub(crate) const EVENT_KEY_DOWN: u32 = 10;
@@ -27,10 +23,8 @@ const EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 const FIELD_KEYCODE: u32 = 9;
 const FIELD_AUTOREPEAT: u32 = 8;
 
-/// State reachable from the tap callback; boxed so its address is stable.
 pub(crate) struct TapState<'a> {
     audio: &'a Audio,
-    /// Modifier flags seen by the previous FlagsChanged event; None before the first event.
     last_flags: Cell<Option<u64>>,
     caps_key_code: Cell<i32>,
     tap: Cell<CFMachPortRef>,
@@ -67,9 +61,9 @@ impl<'a> Input<'a> {
         let mask = (1u64 << EVENT_KEY_DOWN) | (1u64 << EVENT_KEY_UP) | (1u64 << EVENT_FLAGS_CHANGED);
         unsafe {
             let tap = CGEventTapCreate(
-                1, // kCGSessionEventTap
-                0, // kCGHeadInsertEventTap
-                0, // kCGEventTapOptionDefault
+                1,
+                0,
+                0,
                 mask,
                 keyboard_callback,
                 self.state_ptr(),
@@ -123,8 +117,6 @@ pub(crate) unsafe extern "C" fn keyboard_callback(
         EVENT_FLAGS_CHANGED => {
             let key_code = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as i32;
             let flags = CGEventGetFlags(event);
-            // First event since start: the previous state is this one minus the modifier
-            // this key toggles (querying CGEventSourceFlagsState instead costs ~15 ms).
             let last = state.last_flags.get().unwrap_or(flags ^ modifier_mask(key_code));
             let changed = flags ^ last;
 
@@ -135,9 +127,6 @@ pub(crate) unsafe extern "C" fn keyboard_callback(
                 }
             }
 
-            // Caps Lock toggles: one event per press, no separate release. Play the
-            // press now and the release 100 ms later from a run loop timer, so the tap
-            // thread (and every keyboard event behind it) is never blocked.
             if changed & FLAG_ALPHA_SHIFT != 0 {
                 state.audio.play(key_code, SoundType::Press, event_time);
                 state.caps_key_code.set(key_code);
@@ -159,7 +148,6 @@ pub(crate) unsafe extern "C" fn keyboard_callback(
             state.audio.play(key_code, SoundType::Release, event_time);
         }
         EVENT_TAP_DISABLED_BY_TIMEOUT | EVENT_TAP_DISABLED_BY_USER_INPUT => {
-            // The system turns a slow tap off; turn it back on or sounds stop for good.
             let tap = state.tap.get();
             if !tap.is_null() {
                 CGEventTapEnable(tap, true);
@@ -170,7 +158,6 @@ pub(crate) unsafe extern "C" fn keyboard_callback(
     event
 }
 
-/// Key events carry the current modifier state: use the first one as the baseline.
 #[inline]
 unsafe fn init_flags(state: &TapState, event: CGEventRef) {
     if state.last_flags.get().is_none() {
@@ -178,15 +165,14 @@ unsafe fn init_flags(state: &TapState, event: CGEventRef) {
     }
 }
 
-/// Flag toggled by a modifier key code (0 for anything else).
 fn modifier_mask(key_code: i32) -> u64 {
     match key_code {
-        56 | 60 => MODIFIER_MASKS[0], // left/right shift
-        59 | 62 => MODIFIER_MASKS[1], // left/right control
-        58 | 61 => MODIFIER_MASKS[2], // left/right option
-        54 | 55 => MODIFIER_MASKS[3], // right/left command
-        63 => MODIFIER_MASKS[4],      // fn
-        57 => FLAG_ALPHA_SHIFT,       // caps lock
+        56 | 60 => MODIFIER_MASKS[0],
+        59 | 62 => MODIFIER_MASKS[1],
+        58 | 61 => MODIFIER_MASKS[2],
+        54 | 55 => MODIFIER_MASKS[3],
+        63 => MODIFIER_MASKS[4],
+        57 => FLAG_ALPHA_SHIFT,
         _ => 0,
     }
 }
@@ -210,7 +196,7 @@ unsafe fn schedule_caps_release(info: *mut c_void) {
     );
     if !timer.is_null() {
         CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopCommonModes);
-        CFRelease(timer); // the run loop keeps it until it fires (one-shot)
+        CFRelease(timer);
     }
 }
 
@@ -218,8 +204,6 @@ unsafe extern "C" fn caps_release(_timer: *mut c_void, info: *mut c_void) {
     let state = &*(info as *const TapState);
     state.audio.play(state.caps_key_code.get(), SoundType::Release, mach_absolute_time());
 }
-
-// --- FFI ------------------------------------------------------------------------
 
 pub(crate) type CGEventRef = *mut c_void;
 type CFMachPortRef = *mut c_void;

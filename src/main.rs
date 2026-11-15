@@ -10,7 +10,6 @@ use input::Input;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-/// Only stores a flag (async-signal-safe); the run loop polls it every 100 ms.
 extern "C" fn signal_handler(signum: c_int) {
     if signum == SIGINT {
         RUNNING.store(false, Ordering::Relaxed);
@@ -20,12 +19,10 @@ extern "C" fn signal_handler(signum: c_int) {
 fn run(audio: &mut Audio) {
     println!("Kream engine starting...");
 
-    // Load theme sounds - continue even if some sounds fail to load
     if !theme::load_themes(audio, "assets/themes") {
         eprintln!("Warning: Theme loading had issues, continuing with available sounds");
     }
 
-    // Start input capture - this fails if permissions are not granted
     let mut input = Input::new(audio);
     if let Err(e) = input.start() {
         eprintln!("Error: {e}");

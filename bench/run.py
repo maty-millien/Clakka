@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""Build and benchmark the C++ engine (from a git ref) and the Rust engine (working tree).
-
-    python3 bench/run.py                 # both, C++ taken from `main`
-    python3 bench/run.py --only cpp      # baseline only
-    python3 bench/run.py --cpp-ref <ref> --tap-n 2000 --runs 20
-
-Results go to bench/out/results-<impl>.json; a comparison table is printed when
-both result files exist. Run from anywhere; everything runs with cwd = repo root
-so that assets/ resolves.
-"""
 import argparse
 import json
 import os
@@ -29,15 +18,12 @@ FRAMEWORKS = ["CoreGraphics", "AudioToolbox", "CoreFoundation", "CoreAudio", "Ac
 FW_FLAGS = [x for f in FRAMEWORKS for x in ("-framework", f)]
 LINE = re.compile(r"^(\S+) n=(\d+)(?: p50=(\S+) p99=(\S+) max=(\S+) mean=(\S+))?")
 
-
 def sh(cmd, **kw):
     print("+", " ".join(cmd), file=sys.stderr)
     subprocess.run(cmd, check=True, cwd=kw.pop("cwd", ROOT), **kw)
 
-
 def cargo():
     return shutil.which("cargo") or os.path.expanduser("~/.cargo/bin/cargo")
-
 
 def build_cpp(ref):
     src = os.path.join(OUT, "cpp-src")
@@ -47,11 +33,9 @@ def build_cpp(ref):
     data = subprocess.run(["git", "archive", ref, "src", "lib", "assets", "CMakeLists.txt"],
                           cwd=ROOT, check=True, capture_output=True).stdout
     tarfile.open(fileobj=io.BytesIO(data)).extractall(src, filter="data")
-    # Shipped binary, built exactly like `make` on main did.
     build = os.path.join(OUT, "cpp-build")
     sh(["cmake", "-S", src, "-B", build, "-DCMAKE_BUILD_TYPE=Release"], stdout=subprocess.DEVNULL)
     sh(["cmake", "--build", build, "-j"], stdout=subprocess.DEVNULL)
-    # Bench driver: same flags as CMakeLists.txt (-O3 -march=native -funroll-loops, IPO, NDEBUG).
     flags = ["-O3", "-march=native", "-funroll-loops", "-flto", "-DNDEBUG"]
     objs = []
     for f in ["src/audio/Audio.cpp", "src/theme/Theme.cpp", "src/input/Input.cpp", "SHIM"]:
@@ -66,11 +50,9 @@ def build_cpp(ref):
     sh(["clang++", "-flto", "-O3", drv, *objs, *FW_FLAGS, "-o", exe])
     return exe, os.path.join(build, "kream_engine")
 
-
 def build_rust():
     sh([cargo(), "build", "--release"])
     env = dict(os.environ, CARGO_TARGET_DIR=os.path.join(OUT, "shim-target"))
-    # cwd = repo root so .cargo/config.toml (target-cpu=native) applies to the shim too.
     sh([cargo(), "build", "--release", "--manifest-path", os.path.join(BENCH, "shim-rs", "Cargo.toml")], env=env)
     lib = os.path.join(OUT, "shim-target", "release", "libkream_bench_shim.a")
     drv = os.path.join(OUT, "bench.o")
@@ -78,7 +60,6 @@ def build_rust():
     exe = os.path.join(OUT, "bench-rust")
     sh(["clang", "-O3", drv, lib, *FW_FLAGS, "-o", exe])
     return exe, os.path.join(ROOT, "target", "release", "kream_engine")
-
 
 def run_driver(exe, *args):
     p = subprocess.run([exe, *args], cwd=ROOT, capture_output=True, text=True)
@@ -96,15 +77,12 @@ def run_driver(exe, *args):
         res.setdefault("_notes", []).append(f"exit {p.returncode}: {p.stderr.strip()[-300:]}")
     return res
 
-
 def summarize(name, values):
     v = sorted(values)
     return {name: {"n": len(v), "p50": v[len(v) // 2], "p99": v[max(0, int(len(v) * 0.99 + 0.999999) - 1)],
                    "max": v[-1], "mean": statistics.fmean(v)}}
 
-
 def run_binary(binary, runs):
-    """Startup to the 'started' line, RSS while idle, max RSS, plus stdout/stderr of the first run."""
     ready, rss, maxrss, first = [], [], [], None
     for i in range(runs):
         t0 = time.perf_counter()
@@ -138,13 +116,11 @@ def run_binary(binary, runs):
     res["_first_run"] = first
     return res
 
-
 def stripped_size(binary, tag):
     dst = os.path.join(OUT, f"stripped-{tag}")
     shutil.copyfile(binary, dst)
     subprocess.run(["strip", dst], check=True)
     return os.path.getsize(dst)
-
 
 def bench(impl, exe, binary, args):
     res = {}
@@ -166,10 +142,8 @@ def bench(impl, exe, binary, args):
         json.dump(res, f, indent=1)
     return res
 
-
 def fmt_ns(x):
     return f"{x / 1e6:.2f} ms" if x >= 1e6 else f"{x / 1e3:.2f} us" if x >= 1e4 else f"{x:.0f} ns"
-
 
 def table(a, b):
     rows = []
@@ -181,7 +155,6 @@ def table(a, b):
         print(f"| {k} | {cell(a)} | {cell(b)} |")
     for k in ("binary_bytes", "binary_stripped_bytes"):
         print(f"| {k} | {a.get(k, 0) / 1024:.0f} KiB | {b.get(k, 0) / 1024:.0f} KiB |")
-
 
 def compare_golden():
     import array
@@ -198,7 +171,6 @@ def compare_golden():
     diff = max((abs(x - y) for x, y in zip(a, b)), default=0.0)
     same = sum(1 for x, y in zip(a, b) if x == y)
     print(f"golden: {len(a)} samples, {same} bit-identical, max abs diff {diff:.3g}")
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -217,7 +189,6 @@ def main():
         a, b = (json.load(open(p)) for p in paths)
         table(a, b)
         compare_golden()
-
 
 if __name__ == "__main__":
     main()

@@ -10,9 +10,6 @@ default-run = "kream_engine"
 name = "kream_engine"
 path = "src/main.rs"
 
-# No dependencies: the CoreAudio, CoreGraphics, CoreFoundation and Mach calls are a
-# couple dozen functions, declared directly as extern "C" in the module that uses them.
-
 [profile.release]
 opt-level = 3
 lto = "fat"
