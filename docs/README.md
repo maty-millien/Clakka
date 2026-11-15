@@ -15,7 +15,7 @@ The waveforms in the GIF above are real: each key was rendered with `kream_engin
 You need macOS and a Rust toolchain.
 
 ```sh
-git clone <repo-url> kream
+git clone git@github.com:maty-millien/Kream.git kream
 cd kream
 cargo build --release
 ```
