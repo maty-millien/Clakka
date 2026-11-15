@@ -40,7 +40,7 @@ pub struct TapError;
 
 impl std::fmt::Display for TapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Failed to create event tap. Check Accessibility permissions.")
+        f.write_str("Failed to create event tap. Check Input Monitoring permissions.")
     }
 }
 
@@ -63,7 +63,7 @@ impl<'a> Input<'a> {
             let tap = CGEventTapCreate(
                 1,
                 0,
-                0,
+                1,
                 mask,
                 keyboard_callback,
                 self.state_ptr(),

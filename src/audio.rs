@@ -100,6 +100,7 @@ pub struct Audio {
     next_fallback: [Cell<usize>; 2],
     sample_rate: f64,
     initialized: bool,
+    latency_log: bool,
     timebase: MachTimebaseInfo,
 }
 
@@ -128,6 +129,7 @@ impl Audio {
             next_fallback: [Cell::new(0), Cell::new(0)],
             sample_rate: 0.0,
             initialized: false,
+            latency_log: std::env::var_os("KREAM_LATENCY_LOG").is_some_and(|v| v == "1"),
             timebase,
         }
     }
@@ -192,7 +194,7 @@ impl Audio {
         }
         unsafe { self.engine.as_ref() }.queue.push(sound);
 
-        if event_time != 0 {
+        if self.latency_log && event_time != 0 {
             self.log_latency(key_code, ty, event_time);
         }
     }
