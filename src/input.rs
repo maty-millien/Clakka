@@ -12,6 +12,13 @@ const MODIFIER_MASKS: [u64; 5] = [
     0x0080_0000,
 ];
 const FLAG_ALPHA_SHIFT: u64 = 0x0001_0000;
+const FLAG_SECONDARY_FN: u64 = MODIFIER_MASKS[4];
+const TRACKED_FLAGS: u64 = MODIFIER_MASKS[0]
+    | MODIFIER_MASKS[1]
+    | MODIFIER_MASKS[2]
+    | MODIFIER_MASKS[3]
+    | MODIFIER_MASKS[4]
+    | FLAG_ALPHA_SHIFT;
 
 const CAPS_RELEASE_DELAY_S: f64 = 0.1;
 const TIMER_IDLE_S: f64 = 1e9;
@@ -147,7 +154,7 @@ unsafe extern "C" fn keyboard_callback(
     match ty {
         EVENT_FLAGS_CHANGED => {
             let key_code = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as i32;
-            let flags = CGEventGetFlags(event);
+            let flags = CGEventGetFlags(event) & TRACKED_FLAGS;
             let last = state.last_flags.get().unwrap_or(flags ^ modifier_mask(key_code));
             let changed = flags ^ last;
 
@@ -198,7 +205,7 @@ unsafe extern "C" fn keyboard_callback(
 #[inline]
 unsafe fn init_flags(state: &TapState, event: CGEventRef) {
     if state.last_flags.get().is_none() {
-        state.last_flags.set(Some(CGEventGetFlags(event)));
+        state.last_flags.set(Some(CGEventGetFlags(event) & TRACKED_FLAGS & !FLAG_SECONDARY_FN));
     }
 }
 
