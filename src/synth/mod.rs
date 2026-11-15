@@ -29,8 +29,9 @@ const RING: usize = 32;
 const BOARD_UNITS: [f32; 2] = [15.0, 6.0];
 const ITD_S: f32 = 0.000_17;
 const ITD_MAX_HZ: f32 = 1500.0;
-const LOUDNESS_TARGET: f64 = 1e-4;
+const LOUDNESS_TARGET: f64 = 1.4e-4;
 const REFERENCE_PEAK: f32 = 0.5;
+const LOUDNESS_VELOCITY: u8 = 64;
 const HEADROOM: f32 = 0.75;
 
 #[derive(Clone, Copy)]
@@ -412,7 +413,7 @@ impl SynthBank {
     fn loudness(&mut self, code: usize, release: bool, fs: f32) -> f64 {
         self.params.var = 0.0;
         let mut v = SynthVoice::IDLE;
-        v.start(self, code, release, 0, 1);
+        v.start(self, code, release, LOUDNESS_VELOCITY, 1);
         self.params.var = 1.0;
         let (shelf, hp) = k_weighting(f64::from(fs));
         let mut state = [[0.0f64; 4]; 6];

@@ -1,0 +1,35 @@
+[master]
+seed = 0x4B52454D444F4D01
+
+[low]
+freqs = [150, 260, 200, 340]
+t60_ms = [40, 30, 50, 35]
+gains_db = [-10, -8, -16, -12]
+large_freq = 140
+
+[plate]
+t60_ms = [8, 14, 8, 14, 8, 14, 8, 14, 8, 14, 8, 14]
+gains_db = [-11.6, -13.2, -3, -13.2, -6.4, -26.1, -6.4, -26.1, -6.4, -26.1, -10.2, -13.5]
+
+[keycap]
+freqs = [500, 650, 800, 950]
+t60_ms = [20, 18, 16, 14]
+gains_db = [-12, -14, -17, -20]
+
+[switch]
+gains_db = [-26, -34, -38, -46]
+
+[noise]
+hp_hz = 400
+lp_hz = 2500
+t60_ms = 10
+level_db = -20
+
+[hit]
+width_ms = [1.0, 1.6]
+sec_level_db = [-26, -22]
+
+[release]
+low_db = -6
+plate_db = -4
+keycap_db = 0
