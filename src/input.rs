@@ -15,15 +15,15 @@ const FLAG_ALPHA_SHIFT: u64 = 0x0001_0000;
 
 const CAPS_RELEASE_DELAY_S: f64 = 0.1;
 
-pub(crate) const EVENT_KEY_DOWN: u32 = 10;
-pub(crate) const EVENT_KEY_UP: u32 = 11;
-pub(crate) const EVENT_FLAGS_CHANGED: u32 = 12;
+const EVENT_KEY_DOWN: u32 = 10;
+const EVENT_KEY_UP: u32 = 11;
+const EVENT_FLAGS_CHANGED: u32 = 12;
 const EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
 const EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 const FIELD_KEYCODE: u32 = 9;
 const FIELD_AUTOREPEAT: u32 = 8;
 
-pub(crate) struct TapState<'a> {
+struct TapState<'a> {
     audio: &'a Audio,
     last_flags: Cell<Option<u64>>,
     caps_key_code: Cell<i32>,
@@ -31,7 +31,7 @@ pub(crate) struct TapState<'a> {
 }
 
 pub struct Input<'a> {
-    pub(crate) state: Box<TapState<'a>>,
+    state: Box<TapState<'a>>,
     run_loop_source: CFRunLoopSourceRef,
 }
 
@@ -93,7 +93,7 @@ impl<'a> Input<'a> {
         self.run_loop_source = ptr::null_mut();
     }
 
-    pub(crate) fn state_ptr(&self) -> *mut c_void {
+    fn state_ptr(&self) -> *mut c_void {
         (&*self.state as *const TapState).cast_mut().cast()
     }
 }
@@ -104,7 +104,7 @@ impl Drop for Input<'_> {
     }
 }
 
-pub(crate) unsafe extern "C" fn keyboard_callback(
+unsafe extern "C" fn keyboard_callback(
     _proxy: *mut c_void,
     ty: u32,
     event: CGEventRef,
@@ -205,7 +205,7 @@ unsafe extern "C" fn caps_release(_timer: *mut c_void, info: *mut c_void) {
     state.audio.play(state.caps_key_code.get(), SoundType::Release, mach_absolute_time());
 }
 
-pub(crate) type CGEventRef = *mut c_void;
+type CGEventRef = *mut c_void;
 type CFMachPortRef = *mut c_void;
 type CFRunLoopSourceRef = *mut c_void;
 type CFRunLoopRef = *mut c_void;

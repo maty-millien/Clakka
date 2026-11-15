@@ -23,14 +23,14 @@ impl SoundType {
     }
 }
 
-pub(crate) struct Sound {
+struct Sound {
     data: Box<[f32]>,
     frames: usize,
     right_offset: usize,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Voice {
+struct Voice {
     left: *const f32,
     right: *const f32,
     frames: usize,
@@ -39,18 +39,18 @@ pub(crate) struct Voice {
 
 const IDLE: Voice = Voice { left: ptr::null(), right: ptr::null(), frames: 0, pos: 0 };
 
-pub(crate) struct RenderState {
-    pub(crate) voices: [Voice; MAX_VOICES],
+struct RenderState {
+    voices: [Voice; MAX_VOICES],
     next_voice: usize,
     rt_scheduled: bool,
     sample_rate: f64,
 }
 
 #[repr(align(128))]
-pub(crate) struct Padded<T>(pub(crate) T);
+struct Padded<T>(T);
 
-pub(crate) struct TriggerQueue {
-    pub(crate) slots: [AtomicPtr<Sound>; QUEUE_CAPACITY],
+struct TriggerQueue {
+    slots: [AtomicPtr<Sound>; QUEUE_CAPACITY],
     head: Padded<Cell<usize>>,
     tail: Padded<Cell<usize>>,
 }
@@ -69,7 +69,7 @@ impl TriggerQueue {
     }
 
     #[inline]
-    pub(crate) fn drain(&self, mut f: impl FnMut(&Sound)) {
+    fn drain(&self, mut f: impl FnMut(&Sound)) {
         let mut tail = self.tail.0.get();
         loop {
             let slot = &self.slots[tail % QUEUE_CAPACITY];
@@ -86,14 +86,14 @@ impl TriggerQueue {
     }
 }
 
-pub(crate) struct Engine {
-    pub(crate) queue: TriggerQueue,
-    pub(crate) render: UnsafeCell<RenderState>,
+struct Engine {
+    queue: TriggerQueue,
+    render: UnsafeCell<RenderState>,
 }
 
 pub struct Audio {
-    pub(crate) audio_unit: AudioUnit,
-    pub(crate) engine: NonNull<Engine>,
+    audio_unit: AudioUnit,
+    engine: NonNull<Engine>,
     #[allow(clippy::vec_box)]
     sounds: Vec<Box<Sound>>,
     explicit: [[*const Sound; KEY_TABLE]; 2],
@@ -363,7 +363,7 @@ fn setup_realtime_thread(buffer_frames: u32, sample_rate: f64) {
     }
 }
 
-pub(crate) unsafe extern "C" fn render_callback(
+unsafe extern "C" fn render_callback(
     ref_con: *mut c_void,
     _flags: *mut u32,
     _time: *const c_void,
@@ -522,7 +522,7 @@ fn planar<const B: usize>(data: &[u8], channels: usize, convert: impl Fn([u8; B]
     out
 }
 
-pub(crate) type AudioUnit = *mut c_void;
+type AudioUnit = *mut c_void;
 type AudioComponent = *mut c_void;
 
 const fn fourcc(c: &[u8; 4]) -> u32 {
@@ -580,16 +580,16 @@ struct AURenderCallbackStruct {
 }
 
 #[repr(C)]
-pub(crate) struct AudioBuffer {
-    pub(crate) number_channels: u32,
-    pub(crate) data_byte_size: u32,
-    pub(crate) data: *mut c_void,
+struct AudioBuffer {
+    number_channels: u32,
+    data_byte_size: u32,
+    data: *mut c_void,
 }
 
 #[repr(C)]
-pub(crate) struct AudioBufferList {
-    pub(crate) number_buffers: u32,
-    pub(crate) buffers: [AudioBuffer; 1],
+struct AudioBufferList {
+    number_buffers: u32,
+    buffers: [AudioBuffer; 1],
 }
 
 #[repr(C)]
@@ -607,7 +607,7 @@ extern "C" {
     fn AudioUnitInitialize(unit: AudioUnit) -> i32;
     fn AudioUnitUninitialize(unit: AudioUnit) -> i32;
     fn AudioOutputUnitStart(unit: AudioUnit) -> i32;
-    pub(crate) fn AudioOutputUnitStop(unit: AudioUnit) -> i32;
+    fn AudioOutputUnitStop(unit: AudioUnit) -> i32;
 }
 
 #[link(name = "CoreAudio", kind = "framework")]

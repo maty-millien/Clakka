@@ -1,7 +1,5 @@
 target/
 
-bench/out/
-
 build/
 
 .vscode/
