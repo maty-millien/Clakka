@@ -28,7 +28,7 @@ Start the engine from the repository root so it finds the `themes/` directory:
 ./target/release/kream_engine
 ```
 
-The first launch fails until you allow your terminal in System Settings > Privacy & Security > Input Monitoring, because Kream listens to key events through a CGEventTap. Restart the engine after granting access. Stop it with Ctrl+C.
+The first launch fails until you allow your terminal in System Settings > Privacy & Security > Input Monitoring, because Kream reads raw keyboard input through IOHIDManager, before macOS turns the top row into media keys. Restart the engine after granting access. Stop it with Ctrl+C.
 
 ## Themes
 
@@ -88,7 +88,7 @@ The sections map to parts of a real keyboard:
 
 Each key gets its own model, built when the theme loads: 24 resonant modes (4 low, 12 plate, 4 keycap, 4 switch) plus a filtered noise burst. The model depends on where the key sits on the board. Wider keys get lower case and keycap modes, the key's position on the plate decides which plate modes it excites, and its horizontal position sets the stereo pan and a small interaural delay, so the left Shift sounds to your left.
 
-On a key event, the event tap packs the key code, press or release, velocity and a random seed into one 64-bit word and pushes it onto a lock-free queue. The CoreAudio render callback pops it, starts one of 24 voices and synthesizes the sound sample by sample. Nothing on that path allocates, locks, makes a syscall or prints. The output stream asks for a 32-frame buffer, under 1 ms at 48 kHz.
+On a key event, the HID callback packs the key code, press or release, velocity and a random seed into one 64-bit word and pushes it onto a lock-free queue. The CoreAudio render callback pops it, starts one of 24 voices and synthesizes the sound sample by sample. Nothing on that path allocates, locks, makes a syscall or prints. The output stream asks for a 32-frame buffer, under 1 ms at 48 kHz.
 
 To see the measured latency of every key event:
 
