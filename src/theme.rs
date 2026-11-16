@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Group<const N: usize> {
     pub freqs: [f32; N],
     pub t60_ms: [f32; N],
@@ -6,20 +6,20 @@ pub struct Group<const N: usize> {
     pub detune: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Low {
     pub modes: Group<4>,
     pub large_freq: f32,
     pub drive_hz: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Plate {
     pub modes: Group<12>,
     pub floor: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Noise {
     pub hp_hz: f32,
     pub lp_hz: f32,
@@ -28,14 +28,14 @@ pub struct Noise {
     pub level_db: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Hit {
     pub width_ms: [f32; 2],
     pub sec_gap_ms: [f32; 2],
     pub sec_level_db: [f32; 2],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Click {
     pub level_db: f32,
     pub width_ms: [f32; 2],
@@ -46,7 +46,7 @@ pub struct Click {
     pub double_db: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Variation {
     pub pitch: f32,
     pub pitch_clip: f32,
@@ -59,7 +59,7 @@ pub struct Variation {
     pub sec_level_db: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Velocity {
     pub window_ms: f32,
     pub range_ms: f32,
@@ -69,7 +69,7 @@ pub struct Velocity {
     pub gap: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Stab {
     pub min_width: f32,
     pub count: [u32; 2],
@@ -79,7 +79,7 @@ pub struct Stab {
     pub low_db: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Release {
     pub hardness: f32,
     pub decay: f32,
@@ -94,7 +94,7 @@ pub struct Release {
     pub sec_level_db: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct KeyVoice {
     pub code: u32,
     pub gains_db: [f32; 5],
@@ -110,7 +110,7 @@ pub const UNUSED: KeyVoice = KeyVoice {
     level_db: 0.0,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Master {
     pub seed: u64,
     pub stereo_width: f32,
@@ -119,7 +119,7 @@ pub struct Master {
     pub key_spread_db: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Theme {
     pub master: Master,
     pub low: Low,
@@ -248,6 +248,18 @@ impl Theme {
     };
 }
 
+const THEMES_DIR: &str = "themes";
+
+fn title(path: &std::path::Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
+    let mut c = stem.chars();
+    c.next()
+        .map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+}
+
 trait Field {
     fn parse(&mut self, words: &[&str]) -> Result<(), String>;
 }
@@ -256,31 +268,29 @@ fn parse_one<T: std::str::FromStr>(w: &str) -> Result<T, String> {
     w.parse().map_err(|_| format!("invalid number '{w}'"))
 }
 
+fn one<'a>(words: &[&'a str]) -> Result<&'a str, String> {
+    match words {
+        [w] => Ok(w),
+        _ => Err(format!("expected 1 value, got {}", words.len())),
+    }
+}
+
 impl Field for f32 {
     fn parse(&mut self, words: &[&str]) -> Result<(), String> {
-        match words {
-            [w] => {
-                *self = parse_one(w)?;
-                Ok(())
-            }
-            _ => Err(format!("expected 1 value, got {}", words.len())),
-        }
+        *self = parse_one(one(words)?)?;
+        Ok(())
     }
 }
 
 impl Field for u64 {
     fn parse(&mut self, words: &[&str]) -> Result<(), String> {
-        match words {
-            [w] => {
-                *self = match w.strip_prefix("0x") {
-                    Some(h) => u64::from_str_radix(&h.replace('_', ""), 16)
-                        .map_err(|_| format!("invalid hex '{w}'"))?,
-                    None => parse_one(w)?,
-                };
-                Ok(())
-            }
-            _ => Err(format!("expected 1 value, got {}", words.len())),
-        }
+        let w = one(words)?;
+        *self = match w.strip_prefix("0x") {
+            Some(h) => u64::from_str_radix(&h.replace('_', ""), 16)
+                .map_err(|_| format!("invalid hex '{w}'"))?,
+            None => parse_one(w)?,
+        };
+        Ok(())
     }
 }
 
@@ -296,85 +306,30 @@ impl<T: std::str::FromStr + Copy, const N: usize> Field for [T; N] {
     }
 }
 
-fn group<const N: usize>(
-    s: &'static str,
-    g: &mut Group<N>,
-    f: &mut dyn FnMut(&'static str, &'static str, &mut dyn Field),
-) {
-    f(s, "freqs", &mut g.freqs);
-    f(s, "t60_ms", &mut g.t60_ms);
-    f(s, "gains_db", &mut g.gains_db);
-    f(s, "detune", &mut g.detune);
+macro_rules! fields {
+    ($f:ident; $($sec:literal $base:expr => $($name:ident),+;)+) => {
+        $($($f($sec, stringify!($name), &mut $base.$name);)+)+
+    };
 }
 
+#[rustfmt::skip]
 fn visit(p: &mut Theme, f: &mut dyn FnMut(&'static str, &'static str, &mut dyn Field)) {
-    let m = &mut p.master;
-    f("master", "seed", &mut m.seed);
-    f("master", "stereo_width", &mut m.stereo_width);
-    f("master", "size_freq_exp", &mut m.size_freq_exp);
-    f("master", "size_decay_exp", &mut m.size_decay_exp);
-    f("master", "key_spread_db", &mut m.key_spread_db);
-    group("low", &mut p.low.modes, f);
-    f("low", "large_freq", &mut p.low.large_freq);
-    f("low", "drive_hz", &mut p.low.drive_hz);
-    group("plate", &mut p.plate.modes, f);
-    f("plate", "floor", &mut p.plate.floor);
-    group("keycap", &mut p.keycap, f);
-    group("switch", &mut p.switch, f);
-    let n = &mut p.noise;
-    f("noise", "hp_hz", &mut n.hp_hz);
-    f("noise", "lp_hz", &mut n.lp_hz);
-    f("noise", "attack_ms", &mut n.attack_ms);
-    f("noise", "t60_ms", &mut n.t60_ms);
-    f("noise", "level_db", &mut n.level_db);
-    let h = &mut p.hit;
-    f("hit", "width_ms", &mut h.width_ms);
-    f("hit", "sec_gap_ms", &mut h.sec_gap_ms);
-    f("hit", "sec_level_db", &mut h.sec_level_db);
-    let c = &mut p.click;
-    f("click", "level_db", &mut c.level_db);
-    f("click", "width_ms", &mut c.width_ms);
-    f("click", "delay_ms", &mut c.delay_ms);
-    f("click", "release_delay_ms", &mut c.release_delay_ms);
-    f("click", "release_db", &mut c.release_db);
-    f("click", "double_ms", &mut c.double_ms);
-    f("click", "double_db", &mut c.double_db);
-    let v = &mut p.variation;
-    f("variation", "pitch", &mut v.pitch);
-    f("variation", "pitch_clip", &mut v.pitch_clip);
-    f("variation", "mode_pitch", &mut v.mode_pitch);
-    f("variation", "mode_gain_db", &mut v.mode_gain_db);
-    f("variation", "level_db", &mut v.level_db);
-    f("variation", "decay", &mut v.decay);
-    f("variation", "hardness", &mut v.hardness);
-    f("variation", "sec_gap", &mut v.sec_gap);
-    f("variation", "sec_level_db", &mut v.sec_level_db);
-    let v = &mut p.velocity;
-    f("velocity", "window_ms", &mut v.window_ms);
-    f("velocity", "range_ms", &mut v.range_ms);
-    f("velocity", "smoothing", &mut v.smoothing);
-    f("velocity", "level_db", &mut v.level_db);
-    f("velocity", "hardness", &mut v.hardness);
-    f("velocity", "gap", &mut v.gap);
-    let s = &mut p.stab;
-    f("stab", "min_width", &mut s.min_width);
-    f("stab", "count", &mut s.count);
-    f("stab", "delay_ms", &mut s.delay_ms);
-    f("stab", "level_db", &mut s.level_db);
-    f("stab", "damping", &mut s.damping);
-    f("stab", "low_db", &mut s.low_db);
-    let r = &mut p.release;
-    f("release", "hardness", &mut r.hardness);
-    f("release", "decay", &mut r.decay);
-    f("release", "low_db", &mut r.low_db);
-    f("release", "plate_db", &mut r.plate_db);
-    f("release", "keycap_db", &mut r.keycap_db);
-    f("release", "switch_db", &mut r.switch_db);
-    f("release", "noise_db", &mut r.noise_db);
-    f("release", "level_db", &mut r.level_db);
-    f("release", "sec_chance", &mut r.sec_chance);
-    f("release", "sec_gap_ms", &mut r.sec_gap_ms);
-    f("release", "sec_level_db", &mut r.sec_level_db);
+    fields!(f;
+        "master" p.master => seed, stereo_width, size_freq_exp, size_decay_exp, key_spread_db;
+        "low" p.low.modes => freqs, t60_ms, gains_db, detune;
+        "low" p.low => large_freq, drive_hz;
+        "plate" p.plate.modes => freqs, t60_ms, gains_db, detune;
+        "plate" p.plate => floor;
+        "keycap" p.keycap => freqs, t60_ms, gains_db, detune;
+        "switch" p.switch => freqs, t60_ms, gains_db, detune;
+        "noise" p.noise => hp_hz, lp_hz, attack_ms, t60_ms, level_db;
+        "hit" p.hit => width_ms, sec_gap_ms, sec_level_db;
+        "click" p.click => level_db, width_ms, delay_ms, release_delay_ms, release_db, double_ms, double_db;
+        "variation" p.variation => pitch, pitch_clip, mode_pitch, mode_gain_db, level_db, decay, hardness, sec_gap, sec_level_db;
+        "velocity" p.velocity => window_ms, range_ms, smoothing, level_db, hardness, gap;
+        "stab" p.stab => min_width, count, delay_ms, level_db, damping, low_db;
+        "release" p.release => hardness, decay, low_db, plate_db, keycap_db, switch_db, noise_db, level_db, sec_chance, sec_gap_ms, sec_level_db;
+    );
 }
 
 impl Theme {
@@ -384,7 +339,34 @@ impl Theme {
         Theme::parse(&text).map_err(|e| format!("{path}: {e}"))
     }
 
-    pub fn parse(text: &str) -> Result<Theme, String> {
+    pub fn load_all(extra: Option<&str>) -> Result<(Vec<String>, Vec<Theme>), String> {
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(THEMES_DIR)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort_by_key(|p| (p.file_stem().is_none_or(|s| s != "creamy"), p.clone()));
+        if let Some(path) = extra {
+            let path = std::path::PathBuf::from(path);
+            files.retain(|p| p.canonicalize().ok() != path.canonicalize().ok());
+            files.insert(0, path);
+        }
+        let (mut names, mut themes) = (Vec::new(), Vec::new());
+        for path in files {
+            themes.push(Theme::load(&path.to_string_lossy())?);
+            names.push(title(&path));
+        }
+        if themes.is_empty() {
+            names.push("Creamy".to_string());
+            themes.push(Theme::CREAMY);
+        }
+        Ok((names, themes))
+    }
+
+    fn parse(text: &str) -> Result<Theme, String> {
         let mut p = Theme::CREAMY;
         let mut section = String::new();
         for (n, raw) in text.lines().enumerate() {

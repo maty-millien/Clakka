@@ -1,13 +1,15 @@
 mod audio;
-mod cli;
 mod input;
+mod render;
 mod synth;
+mod theme;
 
 use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use audio::Audio;
 use input::Input;
+use theme::Theme;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
@@ -17,57 +19,18 @@ extern "C" fn signal_handler(signum: c_int) {
     }
 }
 
-const THEMES_DIR: &str = "themes";
-
-fn title(stem: &str) -> String {
-    let mut c = stem.chars();
-    c.next()
-        .map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
-}
-
-fn load_themes(extra: Option<&str>) -> Result<(Vec<String>, Vec<synth::theme::Theme>), String> {
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(THEMES_DIR)
-        .map(|d| {
-            d.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-                .collect()
-        })
-        .unwrap_or_default();
-    files.sort_by_key(|p| (p.file_stem().is_none_or(|s| s != "creamy"), p.clone()));
-    if let Some(path) = extra {
-        let path = std::path::PathBuf::from(path);
-        files.retain(|p| p.canonicalize().ok() != path.canonicalize().ok());
-        files.insert(0, path);
-    }
-    let (mut names, mut themes) = (Vec::new(), Vec::new());
-    for path in files {
-        let stem = path
-            .file_stem()
-            .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-        let theme = synth::theme::Theme::load(&path.to_string_lossy())?;
-        names.push(title(&stem));
-        themes.push(theme);
-    }
-    if themes.is_empty() {
-        names.push("Creamy".to_string());
-        themes.push(synth::theme::Theme::CREAMY);
-    }
-    Ok((names, themes))
-}
-
-fn run(audio: &mut Audio, args: &cli::Args) {
+fn run(audio: &mut Audio, args: &render::Args) {
     println!("Kream engine starting...");
 
-    let (names, themes) = match load_themes(args.value("--theme")) {
+    let (names, themes) = match Theme::load_all(args.value("--theme")) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Error: {e}");
             return;
         }
     };
-    if !audio.start_synth(&themes) {
-        eprintln!("Error: Failed to start audio output");
+    if let Err(e) = audio.start(&themes) {
+        eprintln!("Error: {e}");
         return;
     }
     unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
@@ -109,25 +72,20 @@ const USAGE: &str = "usage: kream_engine [--theme FILE]\n\
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let tool = match argv.first().map(String::as_str) {
-        Some("render") => Some(cli::render as fn(&cli::Args) -> Result<(), String>),
-        Some("-h" | "--help") => {
-            println!("{USAGE}");
-            return;
+    match argv.first().map(String::as_str) {
+        Some("render") => {
+            if let Err(e) = render::render(&render::Args(argv[1..].to_vec())) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
-        _ => None,
-    };
-    if let Some(tool) = tool {
-        if let Err(e) = tool(&cli::Args::new(argv[1..].to_vec())) {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
+        Some("-h" | "--help") => println!("{USAGE}"),
+        _ => {
+            let mut audio = Audio::new();
+            unsafe { signal(SIGINT, signal_handler) };
+            run(&mut audio, &render::Args(argv));
         }
-        return;
     }
-    let args = cli::Args::new(argv);
-    let mut audio = Audio::new();
-    unsafe { signal(SIGINT, signal_handler) };
-    run(&mut audio, &args);
 }
 
 const SIGINT: c_int = 2;

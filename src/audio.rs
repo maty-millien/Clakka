@@ -3,9 +3,8 @@ use std::ffi::{c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 
-use crate::synth::rng::splitmix64;
-use crate::synth::theme::Theme;
-use crate::synth::{SynthBank, SynthVoice, VOICES};
+use crate::synth::{splitmix64, SynthBank, SynthVoice, VOICES};
+use crate::theme::Theme;
 
 const BUFFER_FRAMES: u32 = 32;
 const MAX_FRAMES_PER_SLICE: u32 = 4096;
@@ -24,7 +23,7 @@ fn synth_word(key_code: i32, ty: SoundType, velocity: u8, seed: u32) -> u64 {
         | (key_code as u64 & 0xFF)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum SoundType {
     Press = 0,
     Release = 1,
@@ -58,15 +57,14 @@ struct TriggerQueue {
 
 impl TriggerQueue {
     #[inline]
-    fn push(&self, word: u64) -> bool {
+    fn push(&self, word: u64) {
         let head = self.head.0.get();
         let slot = &self.slots[head % QUEUE_CAPACITY];
         if slot.load(Ordering::Relaxed) != 0 {
-            return false;
+            return;
         }
         slot.store(word, Ordering::Relaxed);
         self.head.0.set(head.wrapping_add(1));
-        true
     }
 
     #[inline]
@@ -100,7 +98,6 @@ pub struct Audio {
     sample_rate: f64,
     buffer_frames: u32,
     device_frames: u32,
-    initialized: bool,
     latency_log: bool,
     timebase: MachTimebaseInfo,
     velocity: Velocity,
@@ -110,9 +107,6 @@ pub struct Audio {
 
 struct Velocity {
     ms_per_tick: f32,
-    window_ms: Cell<f32>,
-    range_ms: Cell<f32>,
-    smoothing: Cell<f32>,
     counter: Cell<u64>,
     last_press: Cell<u64>,
     avg_ms: Cell<f32>,
@@ -121,16 +115,16 @@ struct Velocity {
 
 impl Velocity {
     #[inline(always)]
-    fn press(&self, now: u64) {
+    fn press(&self, now: u64, [window_ms, range_ms, smoothing]: [f32; 3]) {
         let last = self.last_press.replace(now);
         let dt = if last == 0 {
             1000.0
         } else {
             (now.wrapping_sub(last) as f32 * self.ms_per_tick).min(1000.0)
         };
-        let avg = self.avg_ms.get() + self.smoothing.get() * (dt - self.avg_ms.get());
+        let avg = self.avg_ms.get() + smoothing * (dt - self.avg_ms.get());
         self.avg_ms.set(avg);
-        let v = ((self.window_ms.get() - avg) / self.range_ms.get()).clamp(0.0, 1.0);
+        let v = ((window_ms - avg) / range_ms).clamp(0.0, 1.0);
         self.value.set((v * 127.0 + 0.5) as u8);
     }
 
@@ -168,13 +162,9 @@ impl Audio {
             sample_rate: 0.0,
             buffer_frames: 0,
             device_frames: 0,
-            initialized: false,
             latency_log: std::env::var_os("KREAM_LATENCY_LOG").is_some_and(|v| v == "1"),
             velocity: Velocity {
                 ms_per_tick: (timebase.numer as f64 / timebase.denom as f64 / 1e6) as f32,
-                window_ms: Cell::new(250.0),
-                range_ms: Cell::new(200.0),
-                smoothing: Cell::new(0.3),
                 counter: Cell::new(0),
                 last_press: Cell::new(0),
                 avg_ms: Cell::new(1000.0),
@@ -186,7 +176,7 @@ impl Audio {
         }
     }
 
-    fn prepare_synth(&mut self, themes: &[Theme], rate: f64) {
+    pub fn prepare(&mut self, themes: &[Theme], rate: f64) {
         let banks = themes.iter().map(|p| SynthBank::new(p, rate)).collect();
         self.theme_velocity = themes
             .iter()
@@ -209,14 +199,6 @@ impl Audio {
         self.set_theme(0);
     }
 
-    pub fn start_synth(&mut self, themes: &[Theme]) -> bool {
-        !self.initialized && self.init_audio_unit(themes)
-    }
-
-    pub fn open_offline(&mut self, theme: &Theme, rate: f64) {
-        self.prepare_synth(std::slice::from_ref(theme), rate);
-    }
-
     pub fn theme_count(&self) -> usize {
         self.theme_velocity.len()
     }
@@ -232,10 +214,6 @@ impl Audio {
         }
         let index = index % count;
         self.theme.set(index);
-        let [window, range, smoothing] = self.theme_velocity[index];
-        self.velocity.window_ms.set(window);
-        self.velocity.range_ms.set(range);
-        self.velocity.smoothing.set(smoothing);
         unsafe { self.engine.as_ref() }
             .current
             .store(index, Ordering::Relaxed);
@@ -248,50 +226,24 @@ impl Audio {
         }
     }
 
-    #[inline]
-    pub fn trigger(&self, key_code: i32, ty: SoundType, velocity: u8, seed: u32) -> bool {
-        unsafe { self.engine.as_ref() }
-            .queue
-            .push(synth_word(key_code, ty, velocity, seed))
-    }
-
     pub fn render_offline(&self, left: &mut [f32], right: &mut [f32]) {
-        let frames = left.len().min(right.len()) as u32;
-        let mut list = TwoBuffers {
-            number_buffers: 2,
-            buffers: [
-                AudioBuffer {
-                    number_channels: 1,
-                    data_byte_size: frames * 4,
-                    data: left.as_mut_ptr().cast(),
-                },
-                AudioBuffer {
-                    number_channels: 1,
-                    data_byte_size: frames * 4,
-                    data: right.as_mut_ptr().cast(),
-                },
-            ],
-        };
-        let mut flags = 0u32;
-        unsafe {
-            render_callback(
-                self.engine.as_ptr().cast(),
-                &mut flags,
-                ptr::null(),
-                0,
-                frames,
-                (&raw mut list).cast::<AudioBufferList>(),
-            );
-        }
+        let n = left.len().min(right.len());
+        unsafe { process(self.engine.as_ref(), &mut left[..n], &mut right[..n]) };
     }
 
     #[inline(always)]
-    pub fn play_at(&self, key_code: i32, ty: SoundType, now: u64) -> bool {
+    pub fn play_at(&self, key_code: i32, ty: SoundType, now: u64) {
         if ty == SoundType::Press {
-            self.velocity.press(now);
+            self.velocity
+                .press(now, self.theme_velocity[self.theme.get()]);
         }
         let seed = self.velocity.seed(now);
-        self.trigger(key_code, ty, self.velocity.value.get(), seed)
+        unsafe { self.engine.as_ref() }.queue.push(synth_word(
+            key_code,
+            ty,
+            self.velocity.value.get(),
+            seed,
+        ));
     }
 
     pub fn ms_to_ticks(&self, ms: f64) -> u64 {
@@ -342,7 +294,7 @@ impl Audio {
         }
     }
 
-    fn init_audio_unit(&mut self, themes: &[Theme]) -> bool {
+    pub fn start(&mut self, themes: &[Theme]) -> Result<(), String> {
         unsafe {
             let desc = AudioComponentDescription {
                 component_type: fourcc(b"auou"),
@@ -353,35 +305,23 @@ impl Audio {
             };
             let component = AudioComponentFindNext(ptr::null_mut(), &desc);
             if component.is_null() {
-                eprintln!("Error: Failed to find HAL output audio component");
-                return false;
+                return Err("Failed to find HAL output audio component".into());
             }
-
-            let status = AudioComponentInstanceNew(component, &mut self.audio_unit);
-            if status != 0 {
-                eprintln!("Error: Failed to create audio unit instance (OSStatus {status})");
-                return false;
-            }
-
+            check(
+                AudioComponentInstanceNew(component, &mut self.audio_unit),
+                "create audio unit instance",
+            )?;
             let device_id =
-                match object_property::<u32>(AUDIO_SYSTEM_OBJECT, b"dOut", SCOPE_GLOBAL_OBJECT) {
-                    Ok(id) => id,
-                    Err(status) => {
-                        eprintln!(
-                            "Error: Failed to get default audio output device (OSStatus {status})"
-                        );
-                        AudioComponentInstanceDispose(self.audio_unit);
-                        self.audio_unit = ptr::null_mut();
-                        return false;
-                    }
-                };
+                object_property::<u32>(AUDIO_SYSTEM_OBJECT, b"dOut", SCOPE_GLOBAL_OBJECT).map_err(
+                    |s| format!("Failed to get default audio output device (OSStatus {s})"),
+                )?;
 
             self.set_property(AU_CURRENT_DEVICE, SCOPE_GLOBAL, 0, &device_id);
             self.sample_rate = object_property::<f64>(device_id, b"nsrt", SCOPE_GLOBAL_OBJECT)
                 .ok()
                 .filter(|r| *r > 0.0)
                 .unwrap_or(DEFAULT_SAMPLE_RATE);
-            self.prepare_synth(themes, self.sample_rate);
+            self.prepare(themes, self.sample_rate);
 
             let [min, _] = object_property::<[f64; 2]>(device_id, b"fsz#", SCOPE_GLOBAL_OBJECT)
                 .unwrap_or([BUFFER_FRAMES as f64; 2]);
@@ -425,22 +365,11 @@ impl Audio {
             };
             self.set_property(AU_SET_RENDER_CALLBACK, SCOPE_INPUT, 0, &callback);
 
-            let status = AudioUnitInitialize(self.audio_unit);
-            if status != 0 {
-                eprintln!("Error: Failed to initialize audio unit (OSStatus {status})");
-                AudioComponentInstanceDispose(self.audio_unit);
-                self.audio_unit = ptr::null_mut();
-                return false;
-            }
-
-            let status = AudioOutputUnitStart(self.audio_unit);
-            if status != 0 {
-                eprintln!("Error: Failed to start audio unit (OSStatus {status})");
-                AudioUnitUninitialize(self.audio_unit);
-                AudioComponentInstanceDispose(self.audio_unit);
-                self.audio_unit = ptr::null_mut();
-                return false;
-            }
+            check(
+                AudioUnitInitialize(self.audio_unit),
+                "initialize audio unit",
+            )?;
+            check(AudioOutputUnitStart(self.audio_unit), "start audio unit")?;
             self.buffer_frames = object_property::<u32>(device_id, b"fsiz", SCOPE_GLOBAL_OBJECT)
                 .unwrap_or(self.buffer_frames);
         }
@@ -448,8 +377,7 @@ impl Audio {
             "Audio output: {} Hz, {}-frame buffer, {} frames of device latency",
             self.sample_rate, self.buffer_frames, self.device_frames
         );
-        self.initialized = true;
-        true
+        Ok(())
     }
 
     unsafe fn set_property<T>(&self, id: u32, scope: u32, element: u32, value: &T) -> i32 {
@@ -502,7 +430,23 @@ unsafe extern "C" fn render_callback(
     frames: u32,
     io: *mut AudioBufferList,
 ) -> i32 {
-    let engine = &*(ref_con as *const Engine);
+    if (*io).number_buffers < 2 {
+        return 0;
+    }
+    let bufs = (&raw mut (*io).buffers).cast::<AudioBuffer>();
+    let n = (frames as usize)
+        .min((*bufs).data_byte_size as usize / 4)
+        .min((*bufs.add(1)).data_byte_size as usize / 4);
+    process(
+        &*(ref_con as *const Engine),
+        std::slice::from_raw_parts_mut((*bufs).data.cast::<f32>(), n),
+        std::slice::from_raw_parts_mut((*bufs.add(1)).data.cast::<f32>(), n),
+    );
+    0
+}
+
+#[inline(always)]
+unsafe fn process(engine: &Engine, out_l: &mut [f32], out_r: &mut [f32]) {
     let st = &mut *engine.render.get();
 
     if !st.fp_ready {
@@ -526,18 +470,14 @@ unsafe extern "C" fn render_callback(
             st.next_synth = (st.next_synth + 1) % VOICES;
         }
     });
-
-    if (*io).number_buffers < 2 {
-        return 0;
-    }
-    let bufs = (&raw mut (*io).buffers).cast::<AudioBuffer>();
-    let n = (frames as usize)
-        .min((*bufs).data_byte_size as usize / 4)
-        .min((*bufs.add(1)).data_byte_size as usize / 4);
-    let out_l = std::slice::from_raw_parts_mut((*bufs).data.cast::<f32>(), n);
-    let out_r = std::slice::from_raw_parts_mut((*bufs.add(1)).data.cast::<f32>(), n);
     mix(st, out_l, out_r);
-    0
+}
+
+fn check(status: i32, what: &str) -> Result<(), String> {
+    match status {
+        0 => Ok(()),
+        _ => Err(format!("Failed to {what} (OSStatus {status})")),
+    }
 }
 
 #[inline(always)]
@@ -685,12 +625,6 @@ struct AudioBuffer {
 struct AudioBufferList {
     number_buffers: u32,
     buffers: [AudioBuffer; 1],
-}
-
-#[repr(C)]
-struct TwoBuffers {
-    number_buffers: u32,
-    buffers: [AudioBuffer; 2],
 }
 
 #[repr(C)]

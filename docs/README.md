@@ -6,7 +6,7 @@
 
 Kream makes your Mac keyboard sound like a mechanical one. It doesn't play recorded samples: every key press and release is synthesized from a physical model, in the audio callback, the moment the key goes down. No two presses sound exactly the same, and each key sounds a little different from its neighbors.
 
-It's a single Rust binary for macOS with no crate dependencies. It talks to CoreAudio and CoreGraphics directly.
+It's a single Rust binary for macOS with no crate dependencies. It talks to CoreAudio and IOKit directly.
 
 The waveforms in the GIF above are real: each key was rendered with `kream_engine render` using the theme shown.
 

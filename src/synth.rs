@@ -1,26 +1,19 @@
-pub mod layout;
-pub mod rng;
-pub mod theme;
-pub mod wav_out;
-
 use std::f32::consts::PI;
 
-use layout::KeyGeom;
-use rng::{splitmix64, Xorshift32, GOLDEN};
-use theme::{Group, Theme};
+use crate::theme::{Group, Theme};
 
-pub const MODES: usize = 24;
+const MODES: usize = 24;
 pub const VOICES: usize = 24;
-pub const KEYS: usize = 128;
-pub const LOW: usize = 0;
-pub const PLATE: usize = 4;
-pub const KEYCAP: usize = 16;
-pub const SWITCH: usize = 20;
+const KEYS: usize = 128;
+const LOW: usize = 0;
+const PLATE: usize = 4;
+const KEYCAP: usize = 16;
+const SWITCH: usize = 20;
 const MAX_PULSES: usize = 6;
 const MAX_SHAPE: usize = 128;
 const MAX_CLICK: usize = 32;
 const CLICK_OFF_DB: f32 = -100.0;
-const BLOCK: usize = 128;
+pub const BLOCK: usize = 128;
 const LN_1000: f32 = 6.907_755;
 const NEPER_PER_DB: f32 = 0.115_129_25;
 const TAIL: f32 = 1.05;
@@ -33,6 +26,92 @@ const LOUDNESS_TARGET: f64 = 1.4e-4;
 const REFERENCE_PEAK: f32 = 0.5;
 const LOUDNESS_VELOCITY: u8 = 64;
 const HEADROOM: f32 = 0.75;
+const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+
+pub fn splitmix64(z: u64) -> u64 {
+    let mut z = z.wrapping_add(GOLDEN);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+#[derive(Clone, Copy)]
+pub struct Xorshift32(u32);
+
+impl Xorshift32 {
+    const ZERO: Xorshift32 = Xorshift32(0x6D2B_79F5);
+
+    #[inline(always)]
+    pub fn new(seed: u32) -> Self {
+        let s = splitmix64(u64::from(seed)) as u32;
+        Xorshift32(if s == 0 { 0x6D2B_79F5 } else { s })
+    }
+
+    #[inline(always)]
+    pub fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        x
+    }
+
+    #[inline(always)]
+    pub fn uniform(&mut self) -> f32 {
+        (self.next_u32() >> 8) as f32 * (1.0 / 16_777_216.0)
+    }
+
+    #[inline(always)]
+    fn bipolar(&mut self) -> f32 {
+        (self.next_u32() as i32) as f32 * (1.0 / 2_147_483_648.0)
+    }
+
+    #[inline(always)]
+    fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (hi - lo) * self.uniform()
+    }
+
+    #[inline(always)]
+    pub fn gauss(&mut self) -> f32 {
+        let s = self.uniform() + self.uniform() + self.uniform() + self.uniform();
+        (s - 2.0) * 1.732_050_8
+    }
+}
+
+#[derive(Clone, Copy)]
+struct KeyGeom {
+    x: f32,
+    y: f32,
+    width: f32,
+}
+
+#[rustfmt::skip]
+const ROWS: [&[(u8, f32)]; 6] = [
+    &[(53, 1.0), (122, 1.0), (120, 1.0), (99, 1.0), (118, 1.0), (96, 1.0), (97, 1.0), (98, 1.0), (100, 1.0), (101, 1.0), (109, 1.0), (103, 1.0), (111, 1.0)],
+    &[(50, 1.0), (18, 1.0), (19, 1.0), (20, 1.0), (21, 1.0), (23, 1.0), (22, 1.0), (26, 1.0), (28, 1.0), (25, 1.0), (29, 1.0), (27, 1.0), (24, 1.0), (51, 2.0)],
+    &[(48, 1.5), (12, 1.0), (13, 1.0), (14, 1.0), (15, 1.0), (17, 1.0), (16, 1.0), (32, 1.0), (34, 1.0), (31, 1.0), (35, 1.0), (33, 1.0), (30, 1.0), (42, 1.5)],
+    &[(57, 1.75), (0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (5, 1.0), (4, 1.0), (38, 1.0), (40, 1.0), (37, 1.0), (41, 1.0), (39, 1.0), (36, 2.25)],
+    &[(56, 2.25), (6, 1.0), (7, 1.0), (8, 1.0), (9, 1.0), (11, 1.0), (45, 1.0), (46, 1.0), (43, 1.0), (47, 1.0), (44, 1.0), (60, 1.75), (126, 1.0)],
+    &[(63, 1.0), (59, 1.0), (58, 1.0), (55, 1.25), (49, 6.25), (54, 1.25), (61, 1.0), (123, 1.0), (125, 1.0), (124, 1.0)],
+];
+
+fn geometry(code: u8) -> Option<KeyGeom> {
+    for (row, keys) in ROWS.iter().enumerate() {
+        let mut x = 0.0;
+        for &(c, w) in keys.iter() {
+            if c == code {
+                return Some(KeyGeom {
+                    x: ((x + 0.5 * w) / BOARD_UNITS[0]).min(1.0),
+                    y: (row as f32 + 0.5) / ROWS.len() as f32,
+                    width: w,
+                });
+            }
+            x += w;
+        }
+    }
+    None
+}
 
 #[derive(Clone, Copy)]
 struct Field {
@@ -79,13 +158,13 @@ impl Fields {
 }
 
 #[derive(Clone, Copy)]
-pub struct KeyModel {
-    pub w: [f32; MODES],
+struct KeyModel {
+    w: [f32; MODES],
     cos: [f32; MODES],
     sin: [f32; MODES],
     norm: [f32; MODES],
-    pub lnr: [f32; MODES],
-    pub amp: [f32; MODES],
+    lnr: [f32; MODES],
+    amp: [f32; MODES],
     gain: [f32; 2],
     delay: [u32; 2],
     shadow: [f32; 2],
@@ -166,7 +245,7 @@ struct Params {
 }
 
 pub struct SynthBank {
-    pub keys: [KeyModel; KEYS],
+    keys: [KeyModel; KEYS],
     params: Params,
 }
 
@@ -218,7 +297,7 @@ fn key_model(
 ) -> KeyModel {
     let seed = splitmix64(p.master.seed ^ (code as u64).wrapping_mul(GOLDEN));
     let mut rng = Xorshift32::new((seed ^ (seed >> 32)) as u32);
-    let geom = layout::geometry(code as u8).unwrap_or_else(|| KeyGeom {
+    let geom = geometry(code as u8).unwrap_or_else(|| KeyGeom {
         x: rng.uniform(),
         y: rng.uniform(),
         width: 1.0,
@@ -303,7 +382,7 @@ fn key_model(
     k
 }
 
-pub fn group(m: usize) -> usize {
+fn group(m: usize) -> usize {
     match m {
         LOW..PLATE => 0,
         PLATE..KEYCAP => 1,
@@ -388,42 +467,43 @@ impl SynthBank {
         bank
     }
 
-    fn nominal_peak(&mut self, code: usize, release: bool) -> f32 {
-        self.peak(code, release, false)
-    }
-
-    fn peak(&mut self, code: usize, release: bool, spatial: bool) -> f32 {
+    fn measure(
+        &mut self,
+        code: usize,
+        release: bool,
+        velocity: u8,
+        spatial: bool,
+        mut f: impl FnMut(&[f32; BLOCK], &[f32; BLOCK]),
+    ) {
         self.params.var = 0.0;
         self.params.spatial = spatial;
         let mut v = SynthVoice::IDLE;
-        v.start(self, code, release, 0, 1);
+        v.start(self, code, release, velocity, 1);
         self.params.var = 1.0;
         self.params.spatial = true;
-        let mut peak = 0.0f32;
         let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
         while v.active() {
             l.fill(0.0);
             r.fill(0.0);
             v.render(&mut l, &mut r);
-            peak = l.iter().chain(&r).fold(peak, |a, x| a.max(x.abs()));
+            f(&l, &r);
         }
+    }
+
+    fn peak(&mut self, code: usize, release: bool, spatial: bool) -> f32 {
+        let mut peak = 0.0f32;
+        self.measure(code, release, 0, spatial, |l, r| {
+            peak = l.iter().chain(r).fold(peak, |a, x| a.max(x.abs()));
+        });
         peak
     }
 
     fn loudness(&mut self, code: usize, release: bool, fs: f32) -> f64 {
-        self.params.var = 0.0;
-        let mut v = SynthVoice::IDLE;
-        v.start(self, code, release, LOUDNESS_VELOCITY, 1);
-        self.params.var = 1.0;
         let (shelf, hp) = k_weighting(f64::from(fs));
         let mut state = [[0.0f64; 4]; 6];
         let mut e = [0.0f64; 3];
-        let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
-        while v.active() {
-            l.fill(0.0);
-            r.fill(0.0);
-            v.render(&mut l, &mut r);
-            for (a, b) in l.iter().zip(&r) {
+        self.measure(code, release, LOUDNESS_VELOCITY, true, |l, r| {
+            for (a, b) in l.iter().zip(r) {
                 let (a, b) = (f64::from(*a), f64::from(*b));
                 for (c, x) in [a, b, 0.5 * (a + b)].into_iter().enumerate() {
                     let shelved = biquad(&shelf, &mut state[2 * c], x);
@@ -431,7 +511,7 @@ impl SynthBank {
                     e[c] += y * y;
                 }
             }
-        }
+        });
         let fs = f64::from(fs);
         (0.5 * (e[0] + e[1]) / fs * 2.0 * e[2] / fs).sqrt()
     }
@@ -442,21 +522,21 @@ impl SynthBank {
         for k in self.keys.iter_mut() {
             k.noise_amp = 0.0;
         }
-        let modal = self.nominal_peak(REFERENCE_KEY, false).max(1e-9);
+        let modal = self.peak(REFERENCE_KEY, false, false).max(1e-9);
         for (k, s) in self.keys.iter_mut().zip(saved) {
             k.noise_amp = modal * s;
         }
-        let scale = target / self.nominal_peak(REFERENCE_KEY, false).max(1e-9);
+        let scale = target / self.peak(REFERENCE_KEY, false, false).max(1e-9);
         for k in self.keys.iter_mut() {
             k.scale(scale);
         }
         self.params.rel_level = 1.0;
-        self.params.rel_level = target * release / self.nominal_peak(REFERENCE_KEY, true).max(1e-9);
+        self.params.rel_level = target * release / self.peak(REFERENCE_KEY, true, false).max(1e-9);
         let loudness: Vec<f64> = (0..KEYS)
             .map(|code| self.loudness(code, false, fs).max(1e-20))
             .collect();
         let placed: Vec<f64> = (0..KEYS)
-            .filter(|&c| layout::geometry(c as u8).is_some())
+            .filter(|&c| geometry(c as u8).is_some())
             .map(|c| loudness[c])
             .collect();
         let mean = placed.iter().sum::<f64>() / placed.len().max(1) as f64;
@@ -773,27 +853,15 @@ impl SynthVoice {
         let n = out.len();
         let pos = self.pos;
         if pos < self.exc_end {
-            let mut x = [0.0f32; BLOCK + 2];
-            x[0] = self.x_hist[0];
-            x[1] = self.x_hist[1];
-            let len = self.shape_len;
-            for p in 0..self.pulses as usize {
-                let s = self.pulse_at[p];
-                if s >= pos + n as u32 || s + len <= pos {
-                    continue;
-                }
-                let a = self.pulse_amp[p];
-                let j0 = pos.saturating_sub(s);
-                let j1 = (pos + n as u32 - s).min(len);
-                for j in j0..j1 {
-                    x[(s + j - pos) as usize + 2] += a * self.shape[j as usize];
-                }
-            }
-            self.x_hist = [x[n], x[n + 1]];
-            let mut d = [0.0f32; BLOCK];
-            for i in 0..n {
-                d[i] = x[i + 2] - 2.0 * x[i + 1] + x[i];
-            }
+            let pulses = self.pulses as usize;
+            let (x, d) = excite(
+                &self.pulse_at[..pulses],
+                &self.pulse_amp[..pulses],
+                &self.shape[..self.shape_len as usize],
+                &mut self.x_hist,
+                pos,
+                n,
+            );
             let mut lo = [0.0f32; BLOCK];
             let (a, mut z) = (self.drive, self.drive_state);
             for i in 0..n {
@@ -805,26 +873,16 @@ impl SynthVoice {
             self.drive_state = z;
             let mut dc = [0.0f32; BLOCK];
             if self.clicks > 0 {
-                let mut c = [0.0f32; BLOCK + 2];
-                c[0] = self.c_hist[0];
-                c[1] = self.c_hist[1];
-                let len = self.click_len;
-                for k in 0..self.clicks as usize {
-                    let s = self.click_at[k];
-                    if s >= pos + n as u32 || s + len <= pos {
-                        continue;
-                    }
-                    let a = self.click_amp[k];
-                    let j0 = pos.saturating_sub(s);
-                    let j1 = (pos + n as u32 - s).min(len);
-                    for j in j0..j1 {
-                        c[(s + j - pos) as usize + 2] += a * self.click_shape[j as usize];
-                    }
-                }
-                self.c_hist = [c[n], c[n + 1]];
-                for i in 0..n {
-                    dc[i] = c[i + 2] - 2.0 * c[i + 1] + c[i];
-                }
+                let clicks = self.clicks as usize;
+                dc = excite(
+                    &self.click_at[..clicks],
+                    &self.click_amp[..clicks],
+                    &self.click_shape[..self.click_len as usize],
+                    &mut self.c_hist,
+                    pos,
+                    n,
+                )
+                .1;
             }
             self.resonate::<true>(&lo, &d, &dc, out);
         } else {
@@ -898,6 +956,37 @@ impl SynthVoice {
         self.lp_y = ly;
         self.env = env;
     }
+}
+
+#[inline(always)]
+fn excite(
+    at: &[u32],
+    amp: &[f32],
+    shape: &[f32],
+    hist: &mut [f32; 2],
+    pos: u32,
+    n: usize,
+) -> ([f32; BLOCK + 2], [f32; BLOCK]) {
+    let mut x = [0.0f32; BLOCK + 2];
+    x[0] = hist[0];
+    x[1] = hist[1];
+    let len = shape.len() as u32;
+    for (&s, &a) in at.iter().zip(amp) {
+        if s >= pos + n as u32 || s + len <= pos {
+            continue;
+        }
+        let j0 = pos.saturating_sub(s);
+        let j1 = (pos + n as u32 - s).min(len);
+        for j in j0..j1 {
+            x[(s + j - pos) as usize + 2] += a * shape[j as usize];
+        }
+    }
+    *hist = [x[n], x[n + 1]];
+    let mut d = [0.0f32; BLOCK];
+    for i in 0..n {
+        d[i] = x[i + 2] - 2.0 * x[i + 1] + x[i];
+    }
+    (x, d)
 }
 
 fn k_weighting(fs: f64) -> ([f64; 5], [f64; 5]) {
