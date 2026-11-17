@@ -1,7 +1,7 @@
-<p align="center">
+<p>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="header-dark.svg">
-    <img src="header-light.svg" alt="Clakka: mechanical keyboard sounds for your Mac, synthesized in real time" width="100%">
+    <img src="header-light.svg" alt="Clakka: mechanical keyboard sounds for your Mac, synthesized in real time">
   </picture>
 </p>
 
