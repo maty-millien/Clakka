@@ -1,14 +1,13 @@
 <p align="center">
-  <img src="demo.gif" alt="Clakka typing across its five themes: Creamy, Thock, Clicky, Marble and Muted" width="100%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="header-dark.svg">
+    <img src="header-light.svg" alt="Clakka: mechanical keyboard sounds for your Mac, synthesized in real time" width="100%">
+  </picture>
 </p>
-
-# Clakka
 
 Clakka makes your Mac keyboard sound like a mechanical one. It doesn't play recorded samples: every key press and release is synthesized from a physical model, in the audio callback, the moment the key goes down. No two presses sound exactly the same, and each key sounds a little different from its neighbors.
 
 It's a single Rust binary for macOS with no crate dependencies. It talks to CoreAudio and IOKit directly.
-
-The waveforms in the GIF above are real: each key was rendered with `clakka_engine render` using the theme shown.
 
 ## Install
 
