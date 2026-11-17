@@ -1,22 +1,22 @@
 <p align="center">
-  <img src="demo.gif" alt="Kream typing across its five themes: Creamy, Thock, Clicky, Marble and Muted" width="100%">
+  <img src="demo.gif" alt="Clakka typing across its five themes: Creamy, Thock, Clicky, Marble and Muted" width="100%">
 </p>
 
-# Kream
+# Clakka
 
-Kream makes your Mac keyboard sound like a mechanical one. It doesn't play recorded samples: every key press and release is synthesized from a physical model, in the audio callback, the moment the key goes down. No two presses sound exactly the same, and each key sounds a little different from its neighbors.
+Clakka makes your Mac keyboard sound like a mechanical one. It doesn't play recorded samples: every key press and release is synthesized from a physical model, in the audio callback, the moment the key goes down. No two presses sound exactly the same, and each key sounds a little different from its neighbors.
 
 It's a single Rust binary for macOS with no crate dependencies. It talks to CoreAudio and IOKit directly.
 
-The waveforms in the GIF above are real: each key was rendered with `kream_engine render` using the theme shown.
+The waveforms in the GIF above are real: each key was rendered with `clakka_engine render` using the theme shown.
 
 ## Install
 
 You need macOS and a Rust toolchain.
 
 ```sh
-git clone git@github.com:maty-millien/Kream.git kream
-cd kream
+git clone git@github.com:maty-millien/Clakka.git clakka
+cd clakka
 cargo build --release
 ```
 
@@ -25,10 +25,10 @@ cargo build --release
 Start the engine from the repository root so it finds the `themes/` directory:
 
 ```sh
-./target/release/kream_engine
+./target/release/clakka_engine
 ```
 
-The first launch fails until you allow your terminal in System Settings > Privacy & Security > Input Monitoring, because Kream reads raw keyboard input through IOHIDManager, before macOS turns the top row into media keys. Restart the engine after granting access. Stop it with Ctrl+C.
+The first launch fails until you allow your terminal in System Settings > Privacy & Security > Input Monitoring, because Clakka reads raw keyboard input through IOHIDManager, before macOS turns the top row into media keys. Restart the engine after granting access. Stop it with Ctrl+C.
 
 ## Themes
 
@@ -50,7 +50,7 @@ Switch themes while typing, without restarting:
 To start on a theme of your own, pass its file. It's loaded first, ahead of the bundled ones:
 
 ```sh
-./target/release/kream_engine --theme my-board.toml
+./target/release/clakka_engine --theme my-board.toml
 ```
 
 ## Writing a theme
@@ -93,7 +93,7 @@ On a key event, the HID callback packs the key code, press or release, velocity 
 To see the measured latency of every key event:
 
 ```sh
-KREAM_LATENCY_LOG=1 ./target/release/kream_engine
+CLAKKA_LATENCY_LOG=1 ./target/release/clakka_engine
 ```
 
 ## Rendering to WAV
@@ -102,10 +102,10 @@ KREAM_LATENCY_LOG=1 ./target/release/kream_engine
 
 ```sh
 # 20 presses of A (key code 0), 300 ms apart
-./target/release/kream_engine render --key 0 --n 20 --gap 300 --out out/a.wav --theme themes/thock.toml
+./target/release/clakka_engine render --key 0 --n 20 --gap 300 --out out/a.wav --theme themes/thock.toml
 
 # a set of clips: letters, space, return, modifiers, a row walk and 30 s of typing at 80 WPM
-./target/release/kream_engine render --demo --dir out/thock --theme themes/thock.toml
+./target/release/clakka_engine render --demo --dir out/thock --theme themes/thock.toml
 ```
 
-Key codes are macOS virtual key codes. Run `kream_engine --help` for every option.
+Key codes are macOS virtual key codes. Run `clakka_engine --help` for every option.

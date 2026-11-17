@@ -162,7 +162,7 @@ impl Audio {
             sample_rate: 0.0,
             buffer_frames: 0,
             device_frames: 0,
-            latency_log: std::env::var_os("KREAM_LATENCY_LOG").is_some_and(|v| v == "1"),
+            latency_log: std::env::var_os("CLAKKA_LATENCY_LOG").is_some_and(|v| v == "1"),
             velocity: Velocity {
                 ms_per_tick: (timebase.numer as f64 / timebase.denom as f64 / 1e6) as f32,
                 counter: Cell::new(0),

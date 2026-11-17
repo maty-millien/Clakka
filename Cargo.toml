@@ -1,13 +1,13 @@
 [package]
-name = "kream"
+name = "clakka"
 version = "1.0.0"
 edition = "2021"
 description = "macOS keyboard sound engine"
 publish = false
-default-run = "kream_engine"
+default-run = "clakka_engine"
 
 [[bin]]
-name = "kream_engine"
+name = "clakka_engine"
 path = "src/main.rs"
 
 [profile.release]

@@ -20,7 +20,7 @@ extern "C" fn signal_handler(signum: c_int) {
 }
 
 fn run(audio: &mut Audio, args: &render::Args) {
-    println!("Kream engine starting...");
+    println!("Clakka engine starting...");
 
     let (names, themes) = match Theme::load_all(args.value("--theme")) {
         Ok(v) => v,
@@ -40,7 +40,7 @@ fn run(audio: &mut Audio, args: &render::Args) {
         return;
     }
 
-    println!("Kream engine started. Press keys... (Ctrl+C to quit)");
+    println!("Clakka engine started. Press keys... (Ctrl+C to quit)");
     println!(
         "Themes: {}",
         names
@@ -63,12 +63,12 @@ fn run(audio: &mut Audio, args: &render::Args) {
     }
 
     input.stop();
-    println!("Kream engine stopped.");
+    println!("Clakka engine stopped.");
 }
 
-const USAGE: &str = "usage: kream_engine [--theme FILE]\n\
-       kream_engine render [--key CODE] [--n N] [--gap MS] [--hold MS] [--rate HZ] [--seed S] [--press-only] [--out FILE] [--theme FILE]\n\
-       kream_engine render --demo [--dir DIR] [--theme FILE]";
+const USAGE: &str = "usage: clakka_engine [--theme FILE]\n\
+       clakka_engine render [--key CODE] [--n N] [--gap MS] [--hold MS] [--rate HZ] [--seed S] [--press-only] [--out FILE] [--theme FILE]\n\
+       clakka_engine render --demo [--dir DIR] [--theme FILE]";
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();

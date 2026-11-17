@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`kream` is a Rust macOS keyboard-sound engine that synthesizes key sounds in real time.
+`clakka` is a Rust macOS keyboard-sound engine that synthesizes key sounds in real time.
 
 ## Rules
 
